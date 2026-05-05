@@ -77,9 +77,18 @@ type programModel struct {
 	playing      bool
 	dwellElapsed time.Duration
 	commitDwell  time.Duration // total dwell time for the current commit
+	// playSpeed scales both elapsed-time-vs-dwell pacing and the typing
+	// units rate. 1.0 = baseline UnitsPerSecond.
+	playSpeed float64
 
 	width, height int
 }
+
+// playSpeedSteps is the discrete ladder used by the +/- keys. Includes
+// 1.0 so the user can always restore the default cadence; otherwise
+// arbitrary float arithmetic would let the speed drift off the
+// calibrated point.
+var playSpeedSteps = []float64{0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0}
 
 func runProgram(h model.History) error {
 	m := newModel(h)
@@ -104,26 +113,28 @@ func newModel(h model.History) programModel {
 		st.Step(h.Commits[0])
 	}
 	m := programModel{
-		history: h,
-		tree:    st,
-		idx:     0,
-		playing: true,
+		history:   h,
+		tree:      st,
+		idx:       0,
+		playing:   true,
+		playSpeed: 1.0,
 	}
 	if len(h.Commits) > 0 {
-		m.commitDwell = replay.DwellFor(h.Commits[0])
+		m.commitDwell = m.computeDwell()
 	}
 	return m
 }
 
 func newStreamingModel(branch, against string, ch <-chan gitlog.LoadBatch) programModel {
 	return programModel{
-		history:  model.History{Branch: branch, Against: against},
-		tree:     replay.NewTreeState(replay.DefaultHalfLife),
-		headTree: replay.NewTreeState(replay.DefaultHalfLife),
-		loadCh:   ch,
-		loading:  true,
-		idx:      0,
-		playing:  true,
+		history:   model.History{Branch: branch, Against: against},
+		tree:      replay.NewTreeState(replay.DefaultHalfLife),
+		headTree:  replay.NewTreeState(replay.DefaultHalfLife),
+		loadCh:    ch,
+		loading:   true,
+		idx:       0,
+		playing:   true,
+		playSpeed: 1.0,
 	}
 }
 
@@ -138,6 +149,12 @@ func (m programModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		// Visible-card count depends on terminal height, and dwell is
+		// sized to the largest *visible* file's budget — so a resize
+		// must invalidate the previous dwell or playback feels off.
+		if len(m.history.Commits) > 0 {
+			m.commitDwell = m.computeDwell()
+		}
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -164,11 +181,23 @@ func (m programModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "G":
 			m.jumpTo(len(m.history.Commits) - 1)
 			return m, nil
+		case "+", "=", ">":
+			m.bumpPlaySpeed(+1)
+			return m, nil
+		case "-", "_", "<":
+			m.bumpPlaySpeed(-1)
+			return m, nil
+		case "0":
+			m.playSpeed = 1.0
+			return m, nil
 		}
 	case tickMsg:
 		if m.playing {
 			m.dwellElapsed += frameTickMS
-			if m.dwellElapsed >= m.commitDwell {
+			// playSpeed accelerates wall-clock progress: a 2x speed
+			// makes 1s of real time count as 2s of dwell. Symmetrically
+			// scales the typing-units rate in renderRight.
+			if m.effectiveElapsed() >= m.commitDwell {
 				if m.idx < len(m.history.Commits)-1 {
 					m.advance(1)
 				} else {
@@ -233,7 +262,7 @@ func (m programModel) applyBatch(b gitlog.LoadBatch) (tea.Model, tea.Cmd) {
 		if startIdx == 0 && len(m.history.Commits) > 0 {
 			m.tree = replay.NewTreeState(replay.DefaultHalfLife)
 			m.tree.Step(m.history.Commits[0])
-			m.commitDwell = replay.DwellFor(m.history.Commits[0])
+			m.commitDwell = m.computeDwell()
 		}
 		if m.pausedAtEnd {
 			m.pausedAtEnd = false
@@ -284,8 +313,128 @@ func (m *programModel) jumpTo(target int) {
 	m.idx = target
 	m.dwellElapsed = 0
 	if target >= 0 && target < len(m.history.Commits) {
-		m.commitDwell = replay.DwellFor(m.history.Commits[target])
+		m.commitDwell = m.computeDwell()
 	}
+}
+
+// effectiveElapsed scales raw dwellElapsed by playSpeed. Used for both
+// the auto-advance check and the typing units rate so they stay in
+// lockstep — a 2x speed runs the typing animation twice as fast AND
+// shortens the wall-clock dwell by half.
+func (m programModel) effectiveElapsed() time.Duration {
+	return time.Duration(float64(m.dwellElapsed) * m.playSpeed)
+}
+
+// commitProgress returns the user-visible fraction (0..1) through the
+// current commit's dwell, clamped. Drives the per-commit progress bar
+// and the time-axis caret.
+func (m programModel) commitProgress() float64 {
+	if m.commitDwell <= 0 {
+		return 0
+	}
+	f := float64(m.effectiveElapsed()) / float64(m.commitDwell)
+	if f < 0 {
+		f = 0
+	}
+	if f > 1 {
+		f = 1
+	}
+	return f
+}
+
+// expandableCount mirrors the "how many full cards fit in the right
+// pane" calc from renderRight, so dwell sizing and rendering agree on
+// which files contribute. Falls back to a sensible default when the
+// height isn't known yet (pre-WindowSizeMsg).
+func (m programModel) expandableCount() int {
+	h := m.height
+	if h <= 0 {
+		h = 30
+	}
+	// Footer (5 rows) + header (1) + subject (1) + pane borders (2) ≈ 9
+	// rows of chrome around the right pane. Same constants the live
+	// view uses, just approximated upfront so we don't need to render
+	// to compute dwell.
+	const chrome = 9
+	bodyH := h - chrome
+	if bodyH < 4 {
+		bodyH = 4
+	}
+	available := bodyH - 5 // commit summary card consumes ~5 rows
+	if available < 4 {
+		available = 4
+	}
+	const expandedCardLines = 7
+	expandable := available / expandedCardLines
+	if expandable < 1 {
+		expandable = 1
+	}
+	return expandable
+}
+
+// computeDwell sizes the dwell to the largest *visible* file's budget,
+// not the largest budget in the commit. Previously a commit with one
+// huge offscreen file (rendered as a one-line summary) would dwell for
+// the full 3s clamp while the visible cards finished typing in a few
+// hundred ms — leaving the user staring at a static screen most of the
+// time.
+//
+// Adds a small read tail so the user can see the finished cards before
+// the next commit replaces them.
+func (m programModel) computeDwell() time.Duration {
+	const readTail = 350 * time.Millisecond
+	if m.idx < 0 || m.idx >= len(m.history.Commits) {
+		return replay.MinCommitMS
+	}
+	c := m.history.Commits[m.idx]
+	expandable := m.expandableCount()
+	maxB := 0
+	for i, f := range c.Files {
+		if i >= expandable {
+			break
+		}
+		if b := replay.FileBudget(f); b > maxB {
+			maxB = b
+		}
+	}
+	if maxB == 0 {
+		maxB = replay.MinFileBudget
+	}
+	secs := float64(maxB) / replay.UnitsPerSecond
+	d := time.Duration(secs*float64(time.Second)) + readTail
+	if d < replay.MinCommitMS {
+		d = replay.MinCommitMS
+	}
+	if d > replay.MaxCommitMS {
+		d = replay.MaxCommitMS
+	}
+	return d
+}
+
+// bumpPlaySpeed steps along playSpeedSteps. Snaps to the nearest step
+// first when the current speed isn't on the ladder (defensive — could
+// only happen via persisted state someday).
+func (m *programModel) bumpPlaySpeed(dir int) {
+	cur := 0
+	bestDiff := 1e9
+	for i, s := range playSpeedSteps {
+		d := s - m.playSpeed
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDiff {
+			bestDiff = d
+			cur = i
+		}
+	}
+	next := cur + dir
+	if next < 0 {
+		next = 0
+	}
+	if next >= len(playSpeedSteps) {
+		next = len(playSpeedSteps) - 1
+	}
+	m.playSpeed = playSpeedSteps[next]
 }
 
 // nearestSnapshot returns the snapshot whose index is the largest one
@@ -365,13 +514,25 @@ func (m programModel) View() string {
 	if bodyH < 6 {
 		bodyH = 6
 	}
+	// Width split: aim for 2/5 left, but keep both panes ≥ their
+	// minimums *and* leftW + rightW == m.width so JoinHorizontal never
+	// produces lines wider than the terminal. Letting the floors stack
+	// (left=28, right=30 on a 40-cell terminal) overflowed and wrapped,
+	// which is what the user saw as "崩れる" on resize.
+	const minLeft, minRight = 28, 30
 	leftW := m.width * 2 / 5
-	if leftW < 28 {
-		leftW = 28
+	if leftW < minLeft {
+		leftW = minLeft
+	}
+	if m.width-leftW < minRight {
+		leftW = m.width - minRight
+	}
+	if leftW < 1 {
+		leftW = 1
 	}
 	rightW := m.width - leftW
-	if rightW < 30 {
-		rightW = 30
+	if rightW < 1 {
+		rightW = 1
 	}
 
 	// stylePane has a 1-cell rounded border on every side and 1 cell of
@@ -509,14 +670,6 @@ func heatNameStyle(ratio float64) lipgloss.Style {
 }
 
 func (m programModel) renderRight(c model.Commit, width, height int) string {
-	progress := 1.0
-	if m.commitDwell > 0 {
-		progress = float64(m.dwellElapsed) / float64(m.commitDwell)
-	}
-	if progress > 1 {
-		progress = 1
-	}
-
 	var sb strings.Builder
 	// Always lead with a commit-summary card so the right pane is
 	// self-contained — the user can read it without glancing at the
@@ -557,8 +710,11 @@ func (m programModel) renderRight(c model.Commit, width, height int) string {
 	}
 
 	sep := styleDim.Render(strings.Repeat("─", width)) + "\n"
-	maxBudget := replay.CommitMaxBudget(c)
-	units := int(progress * float64(maxBudget))
+	// Constant typing rate: units accumulate at UnitsPerSecond * playSpeed
+	// regardless of dwell duration. Previously units = progress *
+	// CommitMaxBudget made the rate balloon when dwell was clamped to
+	// MaxCommitMS for big commits — content typed too fast to read.
+	units := int(m.effectiveElapsed().Seconds() * replay.UnitsPerSecond)
 	for i, f := range c.Files {
 		fb := replay.FileBudget(f)
 		fileBudget := units
@@ -674,7 +830,9 @@ func (m programModel) renderFooter() string {
 			lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("hot") + " " +
 			lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true).Render("active"),
 	}, "  ")
-	hint := styleDim.Render("space: play/pause   ←/→: step   shift+←/→: ±10   g/G: ends   q: quit")
+	speedTag := styleNew.Render(fmt.Sprintf("%.2gx", m.playSpeed))
+	hint := styleDim.Render("space: play/pause   ←/→: step   shift+←/→: ±10   +/-: speed (") +
+		speedTag + styleDim.Render(", 0:reset)   g/G: ends   q: quit")
 	if m.loadErr != nil {
 		hint = styleDel.Render("load error: "+m.loadErr.Error()) + "  " + hint
 	} else if m.loading && m.loadTotal > 0 {
@@ -695,16 +853,7 @@ func (m programModel) renderCommitProgress(width int) string {
 	if width < 4 || len(m.history.Commits) == 0 {
 		return ""
 	}
-	frac := 0.0
-	if m.commitDwell > 0 {
-		frac = float64(m.dwellElapsed) / float64(m.commitDwell)
-	}
-	if frac > 1 {
-		frac = 1
-	}
-	if frac < 0 {
-		frac = 0
-	}
+	frac := m.commitProgress()
 	filled := int(float64(width) * frac)
 	if filled > width {
 		filled = width
