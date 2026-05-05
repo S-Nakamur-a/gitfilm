@@ -419,9 +419,11 @@
 
   function currentAnims(c) {
     const out = [];
+    const mb = c.max_budget || MIN_FILE_BUDGET;
+    const units = Math.floor(progress * mb);
     for (let i = 0; i < c.files.length; i++) {
       const fb = c.files[i].budget != null ? c.files[i].budget : MIN_FILE_BUDGET;
-      const lb = Math.min(fb, Math.floor(progress * fb));
+      const lb = Math.min(fb, units);
       out.push(applyFileAnim(c.files[i], lb));
     }
     return out;

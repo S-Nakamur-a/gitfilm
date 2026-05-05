@@ -431,8 +431,14 @@ func (m programModel) renderRight(c model.Commit, width, height int) string {
 	}
 
 	sep := styleDim.Render(strings.Repeat("─", width)) + "\n"
+	maxBudget := replay.CommitMaxBudget(c)
+	units := int(progress * float64(maxBudget))
 	for i, f := range c.Files {
-		fileBudget := int(progress * float64(replay.FileBudget(f)))
+		fb := replay.FileBudget(f)
+		fileBudget := units
+		if fileBudget > fb {
+			fileBudget = fb
+		}
 		anim := replay.ApplyFile(f, fileBudget)
 		if i > 0 {
 			sb.WriteString(sep)
