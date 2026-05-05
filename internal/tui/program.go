@@ -454,12 +454,17 @@ func renderNode(sb *strings.Builder, n *replay.TreeNode, prefix string, isRoot b
 			// cooled-off file: dim name, no heat bar so the line is calm
 			line = styleGhost.Render(prefix + marker + name)
 		default:
+			ratio := n.HeatRatio
 			heat := heatBar(n.Heat, maxHeat, 6)
 			touches := ""
 			if n.Touches > 0 {
 				touches = styleDim.Render(fmt.Sprintf(" ×%d", n.Touches))
 			}
-			line = fmt.Sprintf("%s%s%s  %s%s", prefix, marker, name, heat, touches)
+			// Colour the filename by the same heat tier as its bar so
+			// the row reads as "how hot is this file" at a glance — the
+			// bar alone (6 cells, off to the right) was too easy to miss.
+			coloredName := heatNameStyle(ratio).Render(marker + name)
+			line = fmt.Sprintf("%s%s  %s%s", prefix, coloredName, heat, touches)
 		}
 		sb.WriteString(truncate(line, width))
 		sb.WriteByte('\n')
@@ -516,6 +521,19 @@ func heatColor(t float64) lipgloss.Color {
 	default:
 		return lipgloss.Color("196")
 	}
+}
+
+// heatNameStyle styles a file name in the tree by the same heat tier as
+// its heat bar — same color so the eye reads "row tone == heat" without
+// having to find the small bar at the right edge. The hottest tier is
+// also bold so it pops.
+func heatNameStyle(ratio float64) lipgloss.Style {
+	c := heatColor(ratio)
+	s := lipgloss.NewStyle().Foreground(c)
+	if ratio >= 0.75 {
+		s = s.Bold(true)
+	}
+	return s
 }
 
 func (m programModel) renderRight(c model.Commit, width, height int) string {
@@ -678,10 +696,11 @@ func (m programModel) renderFooter() string {
 		styleDel.Render("- del"),
 		styleNew.Render("✨ new"),
 		styleGhost.Render("👻 deleted"),
-		"heat " + lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render("░") +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render("▒") +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("▓") +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("█"),
+		"heat: " +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render("cool") + " " +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render("warm") + " " +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("hot") + " " +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true).Render("active"),
 	}, "  ")
 	hint := styleDim.Render("space: play/pause   ←/→: step   shift+←/→: ±10   g/G: ends   q: quit")
 	if m.loadErr != nil {
@@ -727,28 +746,40 @@ func (m programModel) renderCommitProgress(width int) string {
 }
 
 // renderTimelineBar draws a time-based strip: each cell covers a slice
-// of wall-clock time, density (commit count) is encoded as character
-// shade, branch tag is encoded as color. Long quiet stretches in
-// history render as gaps; busy days as solid blocks.
+// of wall-clock time, density (commits per neighborhood) is encoded as
+// character shade, branch tag as color. Long quiet stretches render as
+// dim baselines; busy days as solid blocks.
+//
+// Density is computed by *windowed sum*, not raw per-cell count.
+// Per-cell counts in TUI-width strips (~80–200 cells) are usually 0 or
+// 1, which made `count/maxCount` collapse to a binary "filled vs empty"
+// look — losing the rhythm we wanted to show. A small sliding window
+// smooths this so adjacent activity reinforces, and isolated commits
+// stay distinguishable from clusters.
 func (m programModel) renderTimelineBar(width int) string {
 	if width < 10 || len(m.history.Commits) == 0 {
 		return ""
 	}
 	cells := replay.TimelineBins(m.history.Commits, width)
+	density, maxD := smoothedDensity(cells, timelineWindow(width))
 	var sb strings.Builder
-	for _, c := range cells {
-		ch := densityChar(c.Density)
-		if c.Count == 0 {
-			sb.WriteString(styleDim.Render(ch))
-			continue
+	for i, c := range cells {
+		var ratio float64
+		if maxD > 0 {
+			ratio = density[i] / maxD
 		}
-		switch c.Tag {
-		case model.BranchTagFeature:
+		ch := densityChar(c.Count, ratio)
+		switch {
+		case c.Count == 0 && ratio == 0:
+			sb.WriteString(styleDim.Render(ch))
+		case c.Tag == model.BranchTagFeature:
 			sb.WriteString(styleFeat.Render(ch))
-		case model.BranchTagAgainst:
+		case c.Tag == model.BranchTagAgainst:
 			sb.WriteString(styleAgst.Render(ch))
 		default:
-			sb.WriteString(styleDim.Render(ch))
+			// Empty cell adjacent to activity: tint by neighborhood's
+			// dominant tag (look two cells either side).
+			sb.WriteString(neighborhoodStyle(cells, i).Render(ch))
 		}
 	}
 	// caret position — by commit time, not commit index, so it tracks
@@ -764,18 +795,87 @@ func (m programModel) renderTimelineBar(width int) string {
 	return sb.String() + "\n" + strings.Repeat(" ", caret) + styleTitle.Render("▲")
 }
 
-// densityChar returns a unicode block element whose darkness reflects
-// commit density in a cell. Empty cells render as a thin baseline so
-// the strip retains a visible axis through quiet periods.
-func densityChar(density float64) string {
-	switch {
-	case density <= 0:
+// timelineWindow returns the sliding-window radius used to smooth
+// per-cell counts. ~5% of the strip width, with a small minimum so
+// even very narrow terminals still get some smoothing.
+func timelineWindow(width int) int {
+	w := width / 20
+	if w < 2 {
+		w = 2
+	}
+	if w > 8 {
+		w = 8
+	}
+	return w
+}
+
+// smoothedDensity returns a per-cell density value derived from a
+// sliding-window sum of cell.Count. Returns the smoothed slice plus the
+// max value, so the caller can normalize to 0..1.
+func smoothedDensity(cells []replay.TimelineCell, radius int) ([]float64, float64) {
+	out := make([]float64, len(cells))
+	maxD := 0.0
+	for i := range cells {
+		sum := 0
+		for j := -radius; j <= radius; j++ {
+			k := i + j
+			if k < 0 || k >= len(cells) {
+				continue
+			}
+			sum += cells[k].Count
+		}
+		out[i] = float64(sum)
+		if out[i] > maxD {
+			maxD = out[i]
+		}
+	}
+	return out, maxD
+}
+
+// neighborhoodStyle picks a color for an empty cell that sits inside a
+// run of activity, so the smoothed shading still reads as feat/against
+// instead of falling back to the dim "no commit here" baseline.
+func neighborhoodStyle(cells []replay.TimelineCell, i int) lipgloss.Style {
+	const r = 3
+	feat, agst := 0, 0
+	for j := -r; j <= r; j++ {
+		k := i + j
+		if k < 0 || k >= len(cells) {
+			continue
+		}
+		switch cells[k].Tag {
+		case model.BranchTagFeature:
+			feat += cells[k].Count
+		case model.BranchTagAgainst:
+			agst += cells[k].Count
+		}
+	}
+	if feat == 0 && agst == 0 {
+		return styleDim
+	}
+	if feat >= agst {
+		return styleFeat
+	}
+	return styleAgst
+}
+
+// densityChar picks a unicode block element by:
+//   - hard floor: cell with at least one commit always renders >= ░ so
+//     a single-commit cell stays visible regardless of neighborhood;
+//   - smoothed ratio: dictates how much darker we go beyond the floor.
+//
+// Empty cells with zero neighborhood activity collapse to the thin
+// baseline (·) so quiet stretches read as gaps.
+func densityChar(count int, smoothedRatio float64) string {
+	if count == 0 && smoothedRatio <= 0 {
 		return "·"
-	case density < 0.25:
+	}
+	switch {
+	case smoothedRatio < 0.2:
 		return "░"
-	case density < 0.5:
+	case smoothedRatio < 0.5:
 		return "▒"
-	case density < 0.85:
+	case smoothedRatio < 0.85:
 		return "▓"
 	default:
 		return "█"
