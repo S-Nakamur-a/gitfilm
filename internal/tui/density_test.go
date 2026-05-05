@@ -10,14 +10,16 @@ import (
 
 // TestSmoothedDensity_GivesContrastForSparseRepos guards the case the
 // user reported: with one commit per cell, raw density was uniform 1.0.
-// Windowed smoothing must produce at least three distinct ratio tiers
-// across the strip so the rhythm of bursts vs. lulls reads.
+// Windowed smoothing + quartile thresholds must produce all four shade
+// tiers (░ ▒ ▓ █) plus the baseline · across the strip so the rhythm
+// of bursts vs. lulls reads.
 func TestSmoothedDensity_GivesContrastForSparseRepos(t *testing.T) {
-	width := 50
+	width := 80
 	cells := make([]replay.TimelineCell, width)
-	// Three clusters of 1-commit cells separated by gaps. Mimics a
-	// small repo's wall-clock histogram on a wide-ish terminal.
-	for _, i := range []int{2, 3, 4, 25, 26, 45} {
+	// A graded distribution: a single commit, a small cluster, a big
+	// cluster, separated by long gaps. This is what the GitHub-grass
+	// look needs — mixed densities across the strip.
+	for _, i := range []int{2, 25, 26, 27, 60, 61, 62, 63, 64, 65, 66, 67} {
 		cells[i].Count = 1
 		cells[i].Tag = model.BranchTagFeature
 	}
@@ -25,40 +27,27 @@ func TestSmoothedDensity_GivesContrastForSparseRepos(t *testing.T) {
 	if maxD <= 0 {
 		t.Fatalf("maxD = %v, want > 0", maxD)
 	}
+	q1, q2, q3 := positiveQuartiles(density)
 	tiers := map[string]int{}
 	for i := range cells {
-		var ratio float64
-		if maxD > 0 {
-			ratio = density[i] / maxD
+		tiers[densityCharByQuartile(density[i], q1, q2, q3)]++
+	}
+	for _, want := range []string{"·", "░", "▒", "▓", "█"} {
+		if tiers[want] == 0 {
+			t.Errorf("expected at least one %q cell, got tiers=%v", want, tiers)
 		}
-		tiers[densityChar(cells[i].Count, ratio)]++
-	}
-	if tiers["·"] == 0 {
-		t.Errorf("expected some baseline · cells, got tiers=%v", tiers)
-	}
-	if tiers["█"] == 0 && tiers["▓"] == 0 {
-		t.Errorf("expected at least one strong-density cell, got tiers=%v", tiers)
-	}
-	distinct := 0
-	for _, n := range tiers {
-		if n > 0 {
-			distinct++
-		}
-	}
-	if distinct < 3 {
-		t.Errorf("expected >= 3 distinct visual tiers across strip, got %d (%v)", distinct, tiers)
 	}
 }
 
-// TestDensityChar_FloorForOccupiedCells locks in the rule that a cell
-// with at least one commit always renders darker than the baseline ·,
-// even when the smoothed neighborhood is otherwise quiet.
-func TestDensityChar_FloorForOccupiedCells(t *testing.T) {
-	if got := densityChar(0, 0); got != "·" {
-		t.Errorf("empty cell = %q, want ·", got)
+// TestDensityCharByQuartile_BaselineForZero locks in the rule that
+// only zero-density cells render as the baseline · — any positive
+// density must produce a visible glyph.
+func TestDensityCharByQuartile_BaselineForZero(t *testing.T) {
+	if got := densityCharByQuartile(0, 1, 2, 3); got != "·" {
+		t.Errorf("zero density = %q, want ·", got)
 	}
-	if got := densityChar(1, 0); got == "·" {
-		t.Errorf("occupied cell rendered as baseline · — should always be visible")
+	if got := densityCharByQuartile(0.1, 1, 2, 3); got == "·" {
+		t.Errorf("positive density rendered as baseline · — should always be visible")
 	}
 }
 

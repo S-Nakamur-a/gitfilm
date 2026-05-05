@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -422,13 +423,12 @@ func firstNonEmptyLine(s string) string {
 
 func (m programModel) renderTree(width int) string {
 	root := m.tree.Snapshot()
-	maxHeat := maxNodeHeat(root)
 	var sb strings.Builder
-	renderNode(&sb, root, "", true, width, maxHeat)
+	renderNode(&sb, root, "", true, width)
 	return sb.String()
 }
 
-func renderNode(sb *strings.Builder, n *replay.TreeNode, prefix string, isRoot bool, width int, maxHeat float64) {
+func renderNode(sb *strings.Builder, n *replay.TreeNode, prefix string, isRoot bool, width int) {
 	if !isRoot {
 		marker := ""
 		switch {
@@ -442,29 +442,28 @@ func renderNode(sb *strings.Builder, n *replay.TreeNode, prefix string, isRoot b
 			name = name + "/"
 		}
 
+		// Build the row from non-overlapping styled segments. We never
+		// nest one .Render() inside another's input — the inner segment's
+		// SGR-reset would close the outer style and leave the rest of the
+		// row "stuck" in the wrong color, which (combined with the right
+		// pane's borders) was bleeding through into the left column.
 		var line string
 		switch {
 		case n.Deleted:
-			line = styleGhost.Render(prefix + "👻 " + name + " (deleted)")
+			line = prefix + styleGhost.Render("👻 "+name+" (deleted)")
 		case n.IsDir:
-			// dirs always render plain; hot/cold info comes from their
-			// children
 			line = prefix + name
 		case n.Faint:
-			// cooled-off file: dim name, no heat bar so the line is calm
-			line = styleGhost.Render(prefix + marker + name)
+			line = prefix + marker + styleGhost.Render(name)
 		default:
-			ratio := n.HeatRatio
-			heat := heatBar(n.Heat, maxHeat, 6)
 			touches := ""
 			if n.Touches > 0 {
-				touches = styleDim.Render(fmt.Sprintf(" ×%d", n.Touches))
+				touches = styleDim.Render(fmt.Sprintf("  ×%d", n.Touches))
 			}
-			// Colour the filename by the same heat tier as its bar so
-			// the row reads as "how hot is this file" at a glance — the
-			// bar alone (6 cells, off to the right) was too easy to miss.
-			coloredName := heatNameStyle(ratio).Render(marker + name)
-			line = fmt.Sprintf("%s%s  %s%s", prefix, coloredName, heat, touches)
+			// Color the filename by heat tier — that's the *only* heat
+			// signal in the row now. The previous 6-cell bar at the right
+			// edge was hard to read and added complex nested ANSI.
+			line = prefix + marker + heatNameStyle(n.HeatRatio).Render(name) + touches
 		}
 		sb.WriteString(truncate(line, width))
 		sb.WriteByte('\n')
@@ -478,35 +477,8 @@ func renderNode(sb *strings.Builder, n *replay.TreeNode, prefix string, isRoot b
 				branch = "├ "
 			}
 		}
-		renderNode(sb, c, prefix+branch, false, width, maxHeat)
+		renderNode(sb, c, prefix+branch, false, width)
 	}
-}
-
-func maxNodeHeat(n *replay.TreeNode) float64 {
-	max := n.Heat
-	for _, c := range n.Children {
-		if h := maxNodeHeat(c); h > max {
-			max = h
-		}
-	}
-	return max
-}
-
-// heatBar renders a small colored gauge representing heat / maxHeat.
-func heatBar(heat, max float64, width int) string {
-	if max <= 0 || heat <= 0 {
-		return styleDim.Render(strings.Repeat("░", width))
-	}
-	filled := int(float64(width) * (heat / max))
-	if filled < 0 {
-		filled = 0
-	}
-	if filled > width {
-		filled = width
-	}
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
-	color := heatColor(heat / max)
-	return lipgloss.NewStyle().Foreground(color).Render(bar)
 }
 
 func heatColor(t float64) lipgloss.Color {
@@ -761,16 +733,13 @@ func (m programModel) renderTimelineBar(width int) string {
 		return ""
 	}
 	cells := replay.TimelineBins(m.history.Commits, width)
-	density, maxD := smoothedDensity(cells, timelineWindow(width))
+	density, _ := smoothedDensity(cells, timelineWindow(width))
+	q1, q2, q3 := positiveQuartiles(density)
 	var sb strings.Builder
 	for i, c := range cells {
-		var ratio float64
-		if maxD > 0 {
-			ratio = density[i] / maxD
-		}
-		ch := densityChar(c.Count, ratio)
+		ch := densityCharByQuartile(density[i], q1, q2, q3)
 		switch {
-		case c.Count == 0 && ratio == 0:
+		case c.Count == 0 && density[i] == 0:
 			sb.WriteString(styleDim.Render(ch))
 		case c.Tag == model.BranchTagFeature:
 			sb.WriteString(styleFeat.Render(ch))
@@ -859,23 +828,54 @@ func neighborhoodStyle(cells []replay.TimelineCell, i int) lipgloss.Style {
 	return styleAgst
 }
 
-// densityChar picks a unicode block element by:
-//   - hard floor: cell with at least one commit always renders >= ░ so
-//     a single-commit cell stays visible regardless of neighborhood;
-//   - smoothed ratio: dictates how much darker we go beyond the floor.
+// positiveQuartiles returns the 25 / 50 / 75 percentile thresholds of
+// strictly-positive smoothed values. Quartiles (vs. fixed cutoffs)
+// guarantee that even a small history fills four shade tiers — the
+// busiest stretch always lands at q3+ ("█"), the quietest active
+// stretch at q1- ("░"). Mirrors how GitHub's contribution graph picks
+// its 5 levels per-user.
 //
-// Empty cells with zero neighborhood activity collapse to the thin
-// baseline (·) so quiet stretches read as gaps.
-func densityChar(count int, smoothedRatio float64) string {
-	if count == 0 && smoothedRatio <= 0 {
+// Returns zeros when there are no positive values; callers should
+// short-circuit to the empty-baseline character in that case.
+func positiveQuartiles(density []float64) (q1, q2, q3 float64) {
+	pos := make([]float64, 0, len(density))
+	for _, v := range density {
+		if v > 0 {
+			pos = append(pos, v)
+		}
+	}
+	if len(pos) == 0 {
+		return 0, 0, 0
+	}
+	sort.Float64s(pos)
+	pick := func(p float64) float64 {
+		i := int(p*float64(len(pos)-1) + 0.5)
+		if i < 0 {
+			i = 0
+		}
+		if i >= len(pos) {
+			i = len(pos) - 1
+		}
+		return pos[i]
+	}
+	return pick(0.25), pick(0.5), pick(0.75)
+}
+
+// densityCharByQuartile maps a smoothed-density value to a 5-level
+// shade based on quartile thresholds. v == 0 always renders as the
+// baseline; positive v uses ░/▒/▓/█ buckets so the busiest cells in
+// the strip get the heaviest glyph regardless of absolute activity
+// level.
+func densityCharByQuartile(v, q1, q2, q3 float64) string {
+	if v <= 0 {
 		return "·"
 	}
 	switch {
-	case smoothedRatio < 0.2:
+	case v <= q1:
 		return "░"
-	case smoothedRatio < 0.5:
+	case v <= q2:
 		return "▒"
-	case smoothedRatio < 0.85:
+	case v <= q3:
 		return "▓"
 	default:
 		return "█"
