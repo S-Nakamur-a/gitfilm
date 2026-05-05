@@ -353,6 +353,9 @@ func buildPayloadTimed(h model.History, diag io.Writer) (metaJSON, [][]commitDet
 		det := commitDetail{
 			Body:     c.Body,
 			Snapshot: snap,
+			// Empty slice (not nil) so JSON encodes [] — JS code reads
+			// `c.files.length` and would throw on null.
+			Files: make([]fileJSON, 0, len(c.Files)),
 		}
 		for _, f := range c.Files {
 			fj := fileJSON{
@@ -361,6 +364,12 @@ func buildPayloadTimed(h model.History, diag io.Writer) (metaJSON, [][]commitDet
 				Added:   f.Added,
 				Removed: f.Removed,
 				Budget:  replay.FileBudgetWith(f, replay.FirstHunkProfile),
+				// Same reason as det.Files: binary / mode-only / empty
+				// renames produce zero hunks. Initialize so JSON is [],
+				// not null. Without this the player crashed at the first
+				// hunkless file (e.g. a merge or binary change) — the
+				// rAF loop died and playback froze around 8 commits in.
+				Hunks: make([]hunkJSON, 0, maxHunksHTML),
 			}
 			// Ship only what the player will render. The HTML profile
 			// shows hunks[0].lines[:VisibleLinesPerHunkHTML]; everything

@@ -384,9 +384,10 @@ function runGitfilm(data) {
   // (LINE_COST, VISIBLE_LINES) come from data.tuning so the algorithm
   // stays in lockstep with the Go side.
   function applyFileAnim(f, budget) {
-    if (!f.hunks.length) return { hi: 0, li: 0, chars: -1, done: true };
+    const hunks = f.hunks || [];
+    if (!hunks.length) return { hi: 0, li: 0, chars: -1, done: true };
     if (budget <= 0) return { hi: 0, li: 0, chars: 0, done: false };
-    const h = f.hunks[0];
+    const h = hunks[0];
     const n = Math.min(VISIBLE_LINES, h.lines.length);
     let rem = budget;
     for (let li = 0; li < n; li++) {
@@ -405,8 +406,9 @@ function runGitfilm(data) {
 
   function consumedFor(f, anim) {
     const budget = f.budget != null ? f.budget : MIN_FILE_BUDGET;
-    if (anim.done || !f.hunks.length) return budget;
-    const h = f.hunks[0];
+    const hunks = f.hunks || [];
+    if (anim.done || !hunks.length) return budget;
+    const h = hunks[0];
     const n = Math.min(VISIBLE_LINES, h.lines.length);
     let consumed = 0;
     for (let li = 0; li < n; li++) {
@@ -472,9 +474,10 @@ function runGitfilm(data) {
     ]);
     card.appendChild(head);
 
-    if (f.hunks.length) {
-      const hi = Math.min(anim.hi, f.hunks.length - 1);
-      const h = f.hunks[hi];
+    const hunks = f.hunks || [];
+    if (hunks.length) {
+      const hi = Math.min(anim.hi, hunks.length - 1);
+      const h = hunks[hi];
       const hunk = el('div', { class: 'hunk' });
       let shown = 0;
       for (let li = 0; li < h.lines.length; li++) {
