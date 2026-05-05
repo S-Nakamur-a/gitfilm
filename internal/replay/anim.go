@@ -28,7 +28,12 @@ const (
 	// VisibleLinesPerHunkHTML is how many lines of the first hunk the
 	// HTML renderer actually displays. Used by FirstHunkProfile so its
 	// budgets don't waste time on lines the user will never see.
-	VisibleLinesPerHunkHTML = 6
+	// Bumped from 6 to 15 to mirror the TUI's expanded card capacity —
+	// trades payload size for a more readable diff view in the HTML
+	// player. Each line adds at most ~width bytes per commit, so 9
+	// extra lines × N commits is a low-single-digit MB hit on a 7.9k-
+	// commit monorepo.
+	VisibleLinesPerHunkHTML = 15
 )
 
 // VisibilityProfile describes how much of a file's diff the renderer

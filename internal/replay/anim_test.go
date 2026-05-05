@@ -158,14 +158,21 @@ func TestFileBudgetWith_FirstHunkProfile_IgnoresLaterHunks(t *testing.T) {
 // FirstHunkProfile must also cap lines per hunk: only the first
 // VisibleLinesPerHunkHTML lines contribute to the budget.
 func TestFileBudgetWith_FirstHunkProfile_CapsLines(t *testing.T) {
-	long := mkHunk(
-		added("aaaa"), added("bbbb"), added("cccc"),
-		added("dddd"), added("eeee"), added("ffff"),
-		added("gggg"), added("hhhh"), // 8 lines but only first 6 count
-	)
+	// Build a hunk with VisibleLinesPerHunkHTML+2 added lines, each
+	// 4 chars long — so the cap, not the file's content, is what
+	// bounds the budget.
+	visible := VisibleLinesPerHunkHTML
+	lines := make([]struct {
+		k model.DiffLineKind
+		t string
+	}, visible+2)
+	for i := range lines {
+		lines[i] = added("aaaa")
+	}
+	long := mkHunk(lines...)
 	f := mkFC(long)
-	// First 6 lines × 4 chars = 24 units; 7th and 8th ignored.
-	if got := FileBudgetWith(f, FirstHunkProfile); got != 24 {
-		t.Errorf("budget = %d, want 24 (6 × 4 chars)", got)
+	want := visible * 4 // each visible added line costs runeCount("aaaa") = 4
+	if got := FileBudgetWith(f, FirstHunkProfile); got != want {
+		t.Errorf("budget = %d, want %d (%d × 4 chars)", got, want, visible)
 	}
 }
