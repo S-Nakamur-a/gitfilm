@@ -1,4 +1,4 @@
-package tui
+package replay
 
 import (
 	"testing"
@@ -70,9 +70,9 @@ func TestApplyFile_AdvancesPastFullLine(t *testing.T) {
 
 func TestApplyFile_ContextLineCostsLineCost(t *testing.T) {
 	f := mkFC(mkHunk(ctx("ctx"), added("ab")))
-	a := ApplyFile(f, lineCost)
+	a := ApplyFile(f, LineCost)
 	if a.LineIdx != 1 || a.CharsInLine != 0 {
-		t.Fatalf("got %+v after lineCost", a)
+		t.Fatalf("got %+v after LineCost", a)
 	}
 	a = ApplyFile(f, 2)
 	if a.LineIdx != 0 || a.CharsInLine != 0 {
@@ -93,16 +93,16 @@ func TestApplyFile_HunkGapCrossing(t *testing.T) {
 		mkHunk(added("a")),
 		mkHunk(added("hello")),
 	)
-	// hunk 0 costs 1; then we need hunkGap (6) before hunk 1
+	// hunk 0 costs 1; then we need HunkGap (6) before hunk 1
 	a := ApplyFile(f, 1)
 	if a.HunkIdx != 1 || a.LineIdx != 0 || a.CharsInLine != 0 || a.Done {
 		t.Fatalf("got %+v after hunk 0 consumed", a)
 	}
-	a = ApplyFile(f, 1+hunkGap)
+	a = ApplyFile(f, 1+HunkGap)
 	if a.HunkIdx != 1 || a.LineIdx != 0 || a.CharsInLine != 0 {
 		t.Fatalf("got %+v at start of hunk 1", a)
 	}
-	a = ApplyFile(f, 1+hunkGap+2)
+	a = ApplyFile(f, 1+HunkGap+2)
 	if a.HunkIdx != 1 || a.LineIdx != 0 || a.CharsInLine != 2 || a.Done {
 		t.Fatalf("got %+v inside hunk 1 line 0 typing", a)
 	}
@@ -125,8 +125,8 @@ func TestPartialLine_BoundsAndFull(t *testing.T) {
 }
 
 func TestFileBudget_HasMinimumFloor(t *testing.T) {
-	if got := FileBudget(model.FileChange{}); got < minFileBudget {
-		t.Errorf("empty file budget = %d, want >= %d", got, minFileBudget)
+	if got := FileBudget(model.FileChange{}); got < MinFileBudget {
+		t.Errorf("empty file budget = %d, want >= %d", got, MinFileBudget)
 	}
 }
 
@@ -138,5 +138,34 @@ func TestCommitMaxBudget_PicksLargest(t *testing.T) {
 	}}
 	if got := CommitMaxBudget(c); got != 20 {
 		t.Errorf("got %d, want 20 (the largest file)", got)
+	}
+}
+
+// FirstHunkProfile must restrict budgets to the first hunk so the HTML
+// renderer's dwell doesn't include time for invisible later hunks.
+func TestFileBudgetWith_FirstHunkProfile_IgnoresLaterHunks(t *testing.T) {
+	f := mkFC(
+		mkHunk(added("ab")),                        // 2 units
+		mkHunk(added("zzzzzzzzzzzzzzzzzzzzzzzzzz")), // would be 26 units if visible
+	)
+	got := FileBudgetWith(f, FirstHunkProfile)
+	// First hunk = 2 units, but MinFileBudget (8) floors it.
+	if got != MinFileBudget {
+		t.Errorf("first-hunk budget = %d, want %d", got, MinFileBudget)
+	}
+}
+
+// FirstHunkProfile must also cap lines per hunk: only the first
+// VisibleLinesPerHunkHTML lines contribute to the budget.
+func TestFileBudgetWith_FirstHunkProfile_CapsLines(t *testing.T) {
+	long := mkHunk(
+		added("aaaa"), added("bbbb"), added("cccc"),
+		added("dddd"), added("eeee"), added("ffff"),
+		added("gggg"), added("hhhh"), // 8 lines but only first 6 count
+	)
+	f := mkFC(long)
+	// First 6 lines × 4 chars = 24 units; 7th and 8th ignored.
+	if got := FileBudgetWith(f, FirstHunkProfile); got != 24 {
+		t.Errorf("budget = %d, want 24 (6 × 4 chars)", got)
 	}
 }

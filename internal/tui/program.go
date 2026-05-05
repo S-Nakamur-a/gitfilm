@@ -6,32 +6,24 @@ import (
 	"time"
 
 	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitplay/internal/replay"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
-// Tunables for the animation. Kept as vars so tests / future flags can override.
+// TUI-only tunables. Animation pacing and tree-state knobs live in
+// internal/replay so the HTML renderer sees the same numbers.
 var (
-	defaultHalfLife = 7.0
-	frameTickMS     = 50 * time.Millisecond
-	// unitsPerSecond controls how fast we burn through the per-file
-	// animation budget. ~200 unit/s feels brisk without losing the
-	// "watching it being typed" effect. Per-file budgets scale with
-	// content size so large diffs naturally take longer.
-	unitsPerSecond = 200.0
-	// minCommitMS / maxCommitMS clamp dwell so trivial commits don't
-	// flash by and refactors don't grind everything to a halt. The
-	// floor is intentionally low — small commits should feel snappy.
-	// The ceiling is also tight: a 200-file refactor doesn't need 6s
-	// of stare time per commit when the user is just browsing.
-	minCommitMS = 250 * time.Millisecond
-	maxCommitMS = 3 * time.Second
+	frameTickMS = 50 * time.Millisecond
 	// snapshotInterval controls TreeState caching for fast backward
 	// navigation. Cache a snapshot every N commits so jumping back
 	// only replays at most N commits instead of the full prefix.
 	snapshotInterval = 100
 )
+
+// DwellFor is re-exported for the CLI's --stats path.
+func DwellFor(c model.Commit) time.Duration { return replay.DwellFor(c) }
 
 type tickMsg time.Time
 
@@ -41,11 +33,11 @@ func tick() tea.Cmd {
 
 type programModel struct {
 	history model.History
-	tree    *TreeState
+	tree    *replay.TreeState
 	// snapshots[i] is a TreeState clone taken AFTER stepping through
 	// commits[0..i*snapshotInterval]. Used to skip most of the replay
 	// when jumping backwards on large histories.
-	snapshots []*TreeState
+	snapshots []*replay.TreeState
 
 	idx          int // current commit index (0-based, oldest first)
 	playing      bool
@@ -63,7 +55,7 @@ func runProgram(h model.History) error {
 }
 
 func newModel(h model.History) programModel {
-	st := NewTreeState(defaultHalfLife)
+	st := replay.NewTreeState(replay.DefaultHalfLife)
 	if len(h.Commits) > 0 {
 		st.Step(h.Commits[0])
 	}
@@ -74,26 +66,9 @@ func newModel(h model.History) programModel {
 		playing: true,
 	}
 	if len(h.Commits) > 0 {
-		m.commitDwell = DwellFor(h.Commits[0])
+		m.commitDwell = replay.DwellFor(h.Commits[0])
 	}
 	return m
-}
-
-// DwellFor returns how long the animation should spend on a commit.
-// Each file in a commit animates in parallel at a constant typing
-// cadence, so the commit ends when the slowest (= largest) file
-// finishes. The clamp keeps trivial commits visible and stops huge
-// commits from grinding the whole timeline to a halt.
-func DwellFor(c model.Commit) time.Duration {
-	secs := float64(CommitMaxBudget(c)) / unitsPerSecond
-	d := time.Duration(secs * float64(time.Second))
-	if d < minCommitMS {
-		d = minCommitMS
-	}
-	if d > maxCommitMS {
-		d = maxCommitMS
-	}
-	return d
 }
 
 func (m programModel) Init() tea.Cmd { return tick() }
@@ -181,7 +156,7 @@ func (m *programModel) jumpTo(target int) {
 	m.idx = target
 	m.dwellElapsed = 0
 	if target >= 0 && target < len(m.history.Commits) {
-		m.commitDwell = DwellFor(m.history.Commits[target])
+		m.commitDwell = replay.DwellFor(m.history.Commits[target])
 	}
 }
 
@@ -189,7 +164,7 @@ func (m *programModel) jumpTo(target int) {
 // <= target, plus a base TreeState we can clone from. Falls back to a
 // fresh empty TreeState (representing "before commit 0") with
 // baseIdx = -1 when no snapshot is suitable.
-func (m *programModel) nearestSnapshot(target int) (int, *TreeState) {
+func (m *programModel) nearestSnapshot(target int) (int, *replay.TreeState) {
 	bucket := target / snapshotInterval
 	if bucket < len(m.snapshots) && m.snapshots[bucket] != nil {
 		return bucket*snapshotInterval + (snapshotInterval - 1), m.snapshots[bucket]
@@ -200,7 +175,7 @@ func (m *programModel) nearestSnapshot(target int) (int, *TreeState) {
 			return b*snapshotInterval + (snapshotInterval - 1), m.snapshots[b]
 		}
 	}
-	return -1, NewTreeState(defaultHalfLife)
+	return -1, replay.NewTreeState(replay.DefaultHalfLife)
 }
 
 // maybeSnapshot records a TreeState clone after stepping through
@@ -221,17 +196,17 @@ func (m *programModel) maybeSnapshot(i int) {
 // ---- view ----
 
 var (
-	styleTitle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	styleTitle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	styleSubject  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231"))
 	styleFilePath = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
-	styleDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	styleAdd     = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
-	styleDel     = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	styleNew     = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	styleGhost   = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Faint(true)
-	styleFeat    = lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
-	styleAgst    = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
-	stylePane    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	styleDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	styleAdd      = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
+	styleDel      = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	styleNew      = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	styleGhost    = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Faint(true)
+	styleFeat     = lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
+	styleAgst     = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
+	stylePane     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 )
 
 func (m programModel) View() string {
@@ -265,7 +240,7 @@ func (m programModel) View() string {
 	// stylePane has a 1-cell rounded border on every side and 1 cell of
 	// horizontal padding. Width()/Height() set the OUTER dimensions, so
 	// the inner content box is (W-4) wide and (H-2) tall.
-	innerLeft := leftW - 4   // border (2) + horizontal padding (2)
+	innerLeft := leftW - 4 // border (2) + horizontal padding (2)
 	innerRight := rightW - 4
 	left := stylePane.Width(leftW).MaxWidth(leftW).Height(bodyH).
 		Render(clipPane(m.renderTree(innerLeft), innerLeft, bodyH-2))
@@ -317,7 +292,7 @@ func (m programModel) renderTree(width int) string {
 	return sb.String()
 }
 
-func renderNode(sb *strings.Builder, n *TreeNode, prefix string, isRoot bool, width int, maxHeat float64) {
+func renderNode(sb *strings.Builder, n *replay.TreeNode, prefix string, isRoot bool, width int, maxHeat float64) {
 	if !isRoot {
 		marker := ""
 		switch {
@@ -366,7 +341,7 @@ func renderNode(sb *strings.Builder, n *TreeNode, prefix string, isRoot bool, wi
 	}
 }
 
-func maxNodeHeat(n *TreeNode) float64 {
+func maxNodeHeat(n *replay.TreeNode) float64 {
 	max := n.Heat
 	for _, c := range n.Children {
 		if h := maxNodeHeat(c); h > max {
@@ -457,8 +432,8 @@ func (m programModel) renderRight(c model.Commit, width, height int) string {
 
 	sep := styleDim.Render(strings.Repeat("─", width)) + "\n"
 	for i, f := range c.Files {
-		fileBudget := int(progress * float64(FileBudget(f)))
-		anim := ApplyFile(f, fileBudget)
+		fileBudget := int(progress * float64(replay.FileBudget(f)))
+		anim := replay.ApplyFile(f, fileBudget)
 		if i > 0 {
 			sb.WriteString(sep)
 		}
@@ -472,7 +447,7 @@ func (m programModel) renderRight(c model.Commit, width, height int) string {
 	return sb.String()
 }
 
-func renderFileLine(f model.FileChange, a FileAnim, width int) string {
+func renderFileLine(f model.FileChange, a replay.FileAnim, width int) string {
 	mark := "  "
 	if a.Done {
 		mark = styleAdd.Render("✓ ")
@@ -487,7 +462,7 @@ func renderFileLine(f model.FileChange, a FileAnim, width int) string {
 		stats)
 }
 
-func renderFileCard(f model.FileChange, a FileAnim, width int) string {
+func renderFileCard(f model.FileChange, a replay.FileAnim, width int) string {
 	var sb strings.Builder
 	mark := "▸"
 	markStyle := styleNew
@@ -525,7 +500,7 @@ func renderFileCard(f model.FileChange, a FileAnim, width int) string {
 		text := l.Text
 		showCaret := false
 		if !a.Done && li == a.LineIdx && l.Kind == model.LineAdded {
-			text = PartialLine(l.Text, a.CharsInLine)
+			text = replay.PartialLine(l.Text, a.CharsInLine)
 			showCaret = true
 		}
 		switch l.Kind {
@@ -572,7 +547,7 @@ func (m programModel) renderTimelineBar(width int) string {
 	if width < 10 || len(m.history.Commits) == 0 {
 		return ""
 	}
-	segs := Segments(m.history.Commits)
+	segs := replay.Segments(m.history.Commits)
 	total := len(m.history.Commits)
 	var sb strings.Builder
 	used := 0

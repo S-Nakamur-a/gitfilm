@@ -7,18 +7,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/S-Nakamur-a/gitplay/internal/gitlog"
-	"github.com/S-Nakamur-a/gitplay/internal/htmlout"
 	"github.com/S-Nakamur-a/gitplay/internal/model"
-	"github.com/S-Nakamur-a/gitplay/internal/tui"
+	"github.com/S-Nakamur-a/gitplay/internal/output"
+	"github.com/S-Nakamur-a/gitplay/internal/replay"
 	"github.com/spf13/cobra"
 )
 
 type options struct {
 	against string
-	output  string
+	mode    string
 	repo    string
 	subdir  string
 	htmlOut string
@@ -40,7 +41,7 @@ func New() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.against, "against", "main", "branch considered the parent (merge-base split point)")
-	cmd.Flags().StringVarP(&opts.output, "output", "o", "tui", "output mode: tui | html")
+	cmd.Flags().StringVarP(&opts.mode, "output", "o", "tui", "output mode: "+strings.Join(output.Names(), " | "))
 	cmd.Flags().StringVar(&opts.repo, "repo", ".", "path to the git repository")
 	cmd.Flags().StringVar(&opts.subdir, "path", "", "limit to changes under this subdirectory (relative to repo root)")
 	cmd.Flags().StringVar(&opts.htmlOut, "html-out", "gitplay.html", "html output file path (when -o html)")
@@ -76,23 +77,12 @@ func run(branch string, opts options) error {
 		return nil
 	}
 
-	switch opts.output {
-	case "tui":
-		return tui.Run(frames)
-	case "html":
-		f, err := os.Create(opts.htmlOut)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		if err := htmlout.Render(f, frames); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "wrote %s (%d frames)\n", opts.htmlOut, len(frames.Commits))
-		return nil
-	default:
-		return fmt.Errorf("unknown output mode %q (want tui|html)", opts.output)
+	r, ok := output.Get(opts.mode)
+	if !ok {
+		return fmt.Errorf("unknown output mode %q (want one of: %s)", opts.mode, strings.Join(output.Names(), ", "))
 	}
+	cfg := output.Config{HTMLOutPath: opts.htmlOut}
+	return r.Run(frames, cfg, os.Stderr)
 }
 
 // printStats verifies the perf wins from the recent tuning by
@@ -112,7 +102,7 @@ func printStats(w *os.File, h model.History, loadDur time.Duration) {
 	)
 	runtime.ReadMemStats(&mem)
 	for _, c := range h.Commits {
-		d := tui.DwellFor(c)
+		d := replay.DwellFor(c)
 		dwells = append(dwells, d)
 		if len(c.Files) <= 1 {
 			singleDw = append(singleDw, d)
@@ -189,4 +179,3 @@ func printPercentiles(w *os.File, ds []time.Duration) {
 		pct(0.99).Round(time.Millisecond),
 		ds[len(ds)-1].Round(time.Millisecond))
 }
-

@@ -145,34 +145,29 @@
   let idx = 0;
   let playing = true;
   let progress = 0; // 0..1 within current commit
-  const HALF_LIFE = 7;
-  const DECAY = Math.pow(0.5, 1 / HALF_LIFE);
+  // Tuning values come from the Go side (internal/replay) so heat
+  // decay, hidden/faint thresholds, and animation pacing stay in sync
+  // between the TUI and HTML renderers.
+  const T = data.tuning || {};
+  const VISIBLE_LINES = T.visible_lines || 6;
+  const LINE_COST = T.line_cost || 4;
+  const MIN_FILE_BUDGET = T.min_file_budget || 8;
+  const HIDDEN_BELOW = T.hidden_below || 0.005;
+  const FAINT_BELOW = T.faint_below || 0.05;
 
-  // Precompute per-frame churn snapshots so scrubbing is O(1).
-  const snapshots = [];
-  {
+  // Per-frame heat snapshots are precomputed in Go (parallel arrays)
+  // and reconstituted into Maps/Sets here for fast lookup during
+  // rendering. The browser never reimplements heat decay.
+  const snapshots = commits.map((c) => {
+    const s = c.snapshot || { paths: [], heat: [], touches: [], ghosts: [], added: [] };
     const heat = new Map();
     const touches = new Map();
-    const ghosts = new Set();
-    for (const c of commits) {
-      for (const k of heat.keys()) heat.set(k, heat.get(k) * DECAY);
-      const added = new Set();
-      for (const f of c.files) {
-        if (f.status === 'R' && f.old_path && f.old_path !== f.path) {
-          heat.set(f.path, (heat.get(f.path) || 0) + (heat.get(f.old_path) || 0));
-          touches.set(f.path, (touches.get(f.path) || 0) + (touches.get(f.old_path) || 0));
-          heat.delete(f.old_path);
-          touches.delete(f.old_path);
-        }
-        heat.set(f.path, (heat.get(f.path) || 0) + (f.added + f.removed));
-        touches.set(f.path, (touches.get(f.path) || 0) + 1);
-        if (f.status === 'A') { added.add(f.path); ghosts.delete(f.path); }
-        else if (f.status === 'D') { ghosts.add(f.path); }
-        else { ghosts.delete(f.path); }
-      }
-      snapshots.push({ heat: new Map(heat), touches: new Map(touches), ghosts: new Set(ghosts), added });
+    for (let i = 0; i < s.paths.length; i++) {
+      heat.set(s.paths[i], s.heat[i]);
+      touches.set(s.paths[i], s.touches[i]);
     }
-  }
+    return { heat, touches, ghosts: new Set(s.ghosts), added: new Set(s.added) };
+  });
 
   function heatColor(t) {
     if (t < 0.25) return 'var(--against)';
@@ -180,12 +175,6 @@
     if (t < 0.75) return '#f0c674';
     return 'var(--del)';
   }
-
-  // Visibility thresholds for the B-strategy: hide files whose heat
-  // ratio drops below HIDDEN_BELOW; render files between HIDDEN_BELOW
-  // and FAINT_BELOW in a dim style.
-  const HIDDEN_BELOW = 0.005;
-  const FAINT_BELOW = 0.05;
 
   function renderTree(snap) {
     const panel = document.getElementById('tree-panel');
@@ -282,35 +271,11 @@
     document.getElementById('caret').style.left = 'calc(' + pct + '% - 1px)';
   }
 
-  // Mirror the renderer: only the first hunk is shown, and only the
-  // first VISIBLE_LINES lines of it. Anything beyond that is invisible
-  // and shouldn't extend the dwell time.
-  const VISIBLE_LINES = 6;
-
-  function fileBudget(f) {
-    if (!f.hunks.length) return 8;
-    const h = f.hunks[0];
-    let total = 0;
-    const n = Math.min(VISIBLE_LINES, h.lines.length);
-    for (let i = 0; i < n; i++) {
-      const l = h.lines[i];
-      total += l.k === '+' ? l.t.length : 4;
-    }
-    return Math.max(8, total);
-  }
-
-  function commitMaxBudget(c) {
-    let max = 0;
-    for (const f of c.files) {
-      const b = fileBudget(f);
-      if (b > max) max = b;
-    }
-    return Math.max(8, max);
-  }
-
-  // Animate only the first hunk's first VISIBLE_LINES lines. Once
-  // those finish typing, mark the file done — the user wouldn't see
-  // anything more anyway, so we shouldn't make them wait.
+  // Per-file and per-commit budgets are precomputed in Go (under
+  // FirstHunkProfile, mirroring exactly what this renderer shows). The
+  // browser only advances the typing cursor; cost-of-line constants
+  // (LINE_COST, VISIBLE_LINES) come from data.tuning so the algorithm
+  // stays in lockstep with the Go side.
   function applyFileAnim(f, budget) {
     if (!f.hunks.length) return { hi: 0, li: 0, chars: -1, done: true };
     if (budget <= 0) return { hi: 0, li: 0, chars: 0, done: false };
@@ -324,15 +289,16 @@
         if (rem < len) return { hi: 0, li, chars: rem, done: false };
         rem -= len;
       } else {
-        if (rem < 4) return { hi: 0, li, chars: 0, done: false };
-        rem -= 4;
+        if (rem < LINE_COST) return { hi: 0, li, chars: 0, done: false };
+        rem -= LINE_COST;
       }
     }
     return { hi: 0, li: 0, chars: -1, done: true };
   }
 
   function consumedFor(f, anim) {
-    if (anim.done || !f.hunks.length) return fileBudget(f);
+    const budget = f.budget != null ? f.budget : MIN_FILE_BUDGET;
+    if (anim.done || !f.hunks.length) return budget;
     const h = f.hunks[0];
     const n = Math.min(VISIBLE_LINES, h.lines.length);
     let consumed = 0;
@@ -343,7 +309,7 @@
         consumed += l.k === '+' ? anim.chars : 0;
         break;
       }
-      consumed += l.k === '+' ? l.t.length : 4;
+      consumed += l.k === '+' ? l.t.length : LINE_COST;
     }
     return consumed;
   }
@@ -404,9 +370,8 @@
       const h = f.hunks[hi];
       const hunk = el('div', { class: 'hunk' });
       let shown = 0;
-      const maxLines = 6;
       for (let li = 0; li < h.lines.length; li++) {
-        if (shown >= maxLines) break;
+        if (shown >= VISIBLE_LINES) break;
         if (!anim.done && li > anim.li) break;
         const l = h.lines[li];
         let text = l.t;
@@ -425,7 +390,7 @@
       card.appendChild(hunk);
     }
 
-    const total = fileBudget(f);
+    const total = f.budget != null ? f.budget : MIN_FILE_BUDGET;
     const pct = Math.min(100, (consumedFor(f, anim) / total) * 100);
     card.appendChild(el('div', { class: 'progress' }, el('span', { style: 'width:' + pct + '%' })));
     return card;
@@ -451,21 +416,11 @@
   //   any per-file animation cursor advances.
   let lastIdxRendered = -1;
   let lastRightSig = '';
-  let lastFileBudgets = null; // cached per-file budget for current commit
-  let lastBudgetIdx = -1;
-
-  function fileBudgetsFor(c) {
-    if (lastBudgetIdx === idx && lastFileBudgets) return lastFileBudgets;
-    lastFileBudgets = c.files.map(fileBudget);
-    lastBudgetIdx = idx;
-    return lastFileBudgets;
-  }
 
   function currentAnims(c) {
-    const budgets = fileBudgetsFor(c);
     const out = [];
     for (let i = 0; i < c.files.length; i++) {
-      const fb = budgets[i];
+      const fb = c.files[i].budget != null ? c.files[i].budget : MIN_FILE_BUDGET;
       const lb = Math.min(fb, Math.floor(progress * fb));
       out.push(applyFileAnim(c.files[i], lb));
     }
@@ -502,7 +457,11 @@
   function step(dt) {
     if (!playing) return;
     const c = commits[idx];
-    const dwell = Math.max(0.6, Math.min(8, commitMaxBudget(c) / 60));
+    // dwell_ms is precomputed in Go (replay.DwellForWith with the
+    // first-hunk visibility profile). The browser just turns the wall
+    // clock into progress within the commit.
+    const dwellSec = (c.dwell_ms || 0) / 1000;
+    const dwell = dwellSec > 0 ? dwellSec : 1;
     progress += dt / dwell;
     if (progress >= 1) {
       progress = 0;

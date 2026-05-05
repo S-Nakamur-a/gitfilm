@@ -1,4 +1,4 @@
-package tui
+package replay
 
 import (
 	"math"
@@ -7,6 +7,11 @@ import (
 
 	"github.com/S-Nakamur-a/gitplay/internal/model"
 )
+
+// DefaultHalfLife is the heat half-life (in commits) used by the live
+// UI. A commit's churn contribution loses half its weight every N
+// commits, so the heat-map drifts toward whatever is *recently* hot.
+const DefaultHalfLife = 7.0
 
 // TreeNode is a directory or file in the live filesystem view.
 // Children are kept in a stable order (dirs first, then alphabetical).
@@ -165,8 +170,8 @@ func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 		if ratio < opts.HiddenBelow {
 			continue
 		}
-		insert(root, path, &TreeNode{
-			Name:      base(path),
+		insertNode(root, path, &TreeNode{
+			Name:      basePath(path),
 			Path:      path,
 			IsDir:     false,
 			Touches:   t.touches[path],
@@ -178,8 +183,8 @@ func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 		})
 	}
 	for path := range t.deleted {
-		insert(root, path, &TreeNode{
-			Name:    base(path),
+		insertNode(root, path, &TreeNode{
+			Name:    basePath(path),
 			Path:    path,
 			IsDir:   false,
 			Deleted: true,
@@ -190,6 +195,49 @@ func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 	sortTree(root)
 	pruneEmptyDirs(root)
 	return root
+}
+
+// HeatSnapshot is a renderer-agnostic, JSON-friendly view of the
+// per-frame heat map. Used by the HTML output to ship precomputed
+// snapshots so the browser doesn't reimplement heat decay.
+type HeatSnapshot struct {
+	// Heat is path -> raw heat (post-decay, pre-normalization).
+	Heat map[string]float64
+	// Touches is path -> commits that have touched this path so far.
+	Touches map[string]int
+	// Ghosts is the set of paths currently in the deleted/ghost state.
+	Ghosts map[string]bool
+	// Added is the set of paths added in the most recent step.
+	Added map[string]bool
+}
+
+// HeatSnapshot returns a flat copy of the live state suitable for JSON
+// serialization. Cheaper than SnapshotWith because no filtering or
+// directory tree is built.
+func (t *TreeState) HeatSnapshot() HeatSnapshot {
+	hs := HeatSnapshot{
+		Heat:    make(map[string]float64, len(t.heat)),
+		Touches: make(map[string]int, len(t.touches)),
+		Ghosts:  make(map[string]bool, len(t.deleted)),
+		Added:   make(map[string]bool, len(t.added)),
+	}
+	for k, v := range t.heat {
+		hs.Heat[k] = v
+	}
+	for k, v := range t.touches {
+		hs.Touches[k] = v
+	}
+	for k, v := range t.deleted {
+		if v {
+			hs.Ghosts[k] = true
+		}
+	}
+	for k, v := range t.added {
+		if v {
+			hs.Added[k] = true
+		}
+	}
+	return hs
 }
 
 // pruneEmptyDirs removes directory nodes whose entire subtree is
@@ -210,7 +258,7 @@ func pruneEmptyDirs(n *TreeNode) bool {
 	return n.IsDir && len(n.Children) == 0
 }
 
-func insert(root *TreeNode, path string, leaf *TreeNode) {
+func insertNode(root *TreeNode, path string, leaf *TreeNode) {
 	parts := strings.Split(path, "/")
 	cur := root
 	for i, p := range parts {
@@ -252,7 +300,7 @@ func sortTree(n *TreeNode) {
 	}
 }
 
-func base(path string) string {
+func basePath(path string) string {
 	if i := strings.LastIndexByte(path, '/'); i >= 0 {
 		return path[i+1:]
 	}
