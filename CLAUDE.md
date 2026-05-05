@@ -133,31 +133,56 @@ once — both backends pick it up.
   - `output.Renderer` (registered in `init()`) — non-streaming fallback.
   Imports `internal/replay` for all playback math and `internal/gitlog`
   for the streaming `LoadBatch` type.
-- TUI-only knobs in `program.go`: `frameTickMS`, `snapshotInterval`.
-  Pacing knobs (`UnitsPerSecond` etc.) are in `replay`.
+- File layout — each file is a focused concern, ~100–200 lines:
+  - `program.go` — entry points (`runProgram`, `runStreamingProgram`),
+    package doc.
+  - `layout.go` — every constant that controls screen shape & pacing
+    (pane minima, card height, snapshot interval, `playSpeedSteps`,
+    `readTail`, `frameTickMS`). Single source of truth shared between
+    dwell calc and rendering.
+  - `model.go` — `programModel` struct, constructors, Bubble Tea wiring
+    (`tickMsg`, `batchMsg`, `Init`).
+  - `update.go` — `Update` reducer, key/tick/batch handlers, `applyBatch`.
+  - `nav.go` — `advance`, `jumpTo`, snapshot cache helpers.
+  - `pacing.go` — `effectiveElapsed`, `commitProgress`, `computeDwell`,
+    `expandableCount`, `bumpPlaySpeed`.
+  - `view.go` — top-level `View()` + chrome (header, subject, footer).
+  - `view_tree.go` — left-pane filesystem tree.
+  - `view_right.go` — right-pane commit + file cards (incl.
+    `cardLineWindow` for tail-scroll).
+  - `view_timeline.go` — bottom strip (density, quartile shading,
+    commit progress bar).
+  - `style.go` — module-level styles, `heatNameStyle`, `tagLabel`,
+    `statusBadge`.
+  - `util.go` — `clipPane`, `truncate`, `firstNonEmptyLine`, `pluralS`.
 - **Streaming consumption**: `programModel.loadCh` is non-nil when the
   program was started via `RunStream`. `Init` arms a `waitForBatch` Cmd;
   each `batchMsg` calls `applyBatch` which appends commits to history,
   steps the head tree, and populates snapshot buckets. Single-threaded
   on the Bubble Tea event-loop goroutine, so no locking. First paint is
   bound by the OLDEST shard's completion, not the full Load.
-- **Two tree states**: `m.tree` tracks the user's current `idx` (existing
-  semantics); `m.headTree` tracks the deepest loaded commit so snapshot
-  bucketing stays correct as commits stream in.
+- **Two tree states**: `m.tree` tracks the user's current `idx`;
+  `m.headTree` tracks the deepest loaded commit so snapshot bucketing
+  stays correct as commits stream in.
 - **Auto-resume at stream end**: when autoplay reaches the loaded end
-  while still loading, set `pausedAtEnd` and pause; the next batch
+  while still loading, `pausedAtEnd` flags it and the next batch
   unpauses so playback flows naturally as more commits arrive.
-- **Backward-navigation cache**: `programModel.snapshots[]` stores a
+- **Backward-navigation cache**: `m.snapshots[]` stores a
   `replay.TreeState.Clone()` every `snapshotInterval` (100) commits.
   Jumping back rewinds to the nearest snapshot and replays at most that
-  many commits instead of the whole prefix. Forward jumps step normally;
-  in the streaming path, `applyBatch` populates the bucket as it crosses
-  boundaries during loading.
-- `clipPane` ANSI-aware truncation prevents colored content from spilling
-  between the left/right panes — a regression source historically (see commit
-  `9c6af38`). Use it for any new pane content.
-- The right pane progressively expands cards: top files render full diff cards,
-  the rest collapse to one-line summaries based on the height budget.
+  many commits instead of the whole prefix.
+- **Visible-driven dwell**: `computeDwell` sizes dwell from the largest
+  *visible* file's budget, not `replay.CommitMaxBudget` across all
+  files. Hidden huge files would otherwise extend dwell while the
+  visible cards finished typing in a fraction of it. Recomputed on
+  resize since visible-card count is height-dependent.
+- **Constant typing rate**: `units = elapsed_seconds × UnitsPerSecond ×
+  playSpeed`. Previously `units = progress × maxBudget` made the rate
+  diverge from calibration when dwell hit its Min/Max clamps.
+- **No nested ANSI in pane content**: pre-rendered styled segments are
+  concatenated, never fed back through another `.Render()` — the
+  inner SGR-reset would close the outer style and bleed into adjacent
+  panes. `clipPane` performs ANSI-aware horizontal truncation.
 
 ### HTML output (`internal/htmlout`)
 
@@ -171,6 +196,13 @@ advances the typing cursor, reconstitutes Maps/Sets from the parallel
 arrays, and updates the DOM. **It does not reimplement heat decay,
 budget calculation, or dwell.** Editing `replay` constants flows
 through automatically; do not duplicate them in `template.html`.
+
+File layout:
+- `render.go` — template parse + I/O writer + `Renderer` adapter
+  (`Render`, `RenderWithDiag`, `streamChunks`, `executeHead`).
+- `payload.go` — JSON shapes (`metaJSON`/`commitDetail`/`fileJSON`/
+  `hunkJSON`/`snapshotJSON`/`tuningJSON`) and `buildPayloadTimed` walk.
+- `template.html` — embedded HTML/CSS/JS (player only).
 
 Field names are kept short (`k`, `t` for diff lines) because diff
 payloads dominate file size.
