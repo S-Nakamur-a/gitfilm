@@ -8,6 +8,7 @@ import (
 	"github.com/S-Nakamur-a/gitplay/internal/model"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Tunables for the animation. Kept as vars so tests / future flags can override.
@@ -243,8 +244,8 @@ func (m programModel) View() string {
 	// height from the terminal size — guessing constants ("headerH=1")
 	// caused the top of the screen to clip when WindowSizeMsg lied
 	// or when the subject wrapped to two lines.
-	header := m.renderHeader(cur)
-	subject := m.renderSubject(cur, m.width-2)
+	header := clipPane(m.renderHeader(cur), m.width, 1)
+	subject := clipPane(m.renderSubject(cur, m.width-2), m.width, 1)
 	footer := m.renderFooter()
 	chromeH := lipgloss.Height(header) + lipgloss.Height(subject) + lipgloss.Height(footer)
 
@@ -264,8 +265,12 @@ func (m programModel) View() string {
 	// stylePane has a 1-cell rounded border on every side and 1 cell of
 	// horizontal padding. Width()/Height() set the OUTER dimensions, so
 	// the inner content box is (W-4) wide and (H-2) tall.
-	left := stylePane.Width(leftW).Height(bodyH).Render(clipLines(m.renderTree(leftW-4), bodyH-2))
-	right := stylePane.Width(rightW).Height(bodyH).Render(clipLines(m.renderRight(cur, rightW-4, bodyH-2), bodyH-2))
+	innerLeft := leftW - 4   // border (2) + horizontal padding (2)
+	innerRight := rightW - 4
+	left := stylePane.Width(leftW).MaxWidth(leftW).Height(bodyH).
+		Render(clipPane(m.renderTree(innerLeft), innerLeft, bodyH-2))
+	right := stylePane.Width(rightW).MaxWidth(rightW).Height(bodyH).
+		Render(clipPane(m.renderRight(cur, innerRight, bodyH-2), innerRight, bodyH-2))
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	return lipgloss.JoinVertical(lipgloss.Left, header, subject, body, footer)
 }
@@ -556,7 +561,11 @@ func (m programModel) renderFooter() string {
 			lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("█"),
 	}, "  ")
 	hint := styleDim.Render("space: play/pause   ←/→: step   shift+←/→: ±10   g/G: ends   q: quit")
-	return bar + "\n" + legend + "\n" + hint
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	return clipPane(bar+"\n"+legend+"\n"+hint, w, 3)
 }
 
 func (m programModel) renderTimelineBar(width int) string {
@@ -620,17 +629,24 @@ func statusBadge(s model.ChangeStatus) string {
 	}
 }
 
-// clipLines truncates s to at most max lines so a pane's content
-// can never push the surrounding border off-screen.
-func clipLines(s string, max int) string {
-	if max <= 0 {
+// clipPane bounds rendered content to the pane's inner box: at most
+// `height` lines, each at most `width` cells wide. The horizontal trim
+// is ANSI-aware (preserves color escapes), so colored output won't
+// overflow into the neighbouring pane.
+func clipPane(s string, width, height int) string {
+	if width <= 0 || height <= 0 {
 		return ""
 	}
 	lines := strings.Split(s, "\n")
-	if len(lines) <= max {
-		return s
+	if len(lines) > height {
+		lines = lines[:height]
 	}
-	return strings.Join(lines[:max], "\n")
+	for i, l := range lines {
+		if ansi.StringWidth(l) > width {
+			lines[i] = ansi.Truncate(l, width, "")
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func truncate(s string, max int) string {
