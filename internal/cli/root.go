@@ -14,6 +14,7 @@ import (
 	"github.com/S-Nakamur-a/gitfilm/internal/model"
 	"github.com/S-Nakamur-a/gitfilm/internal/output"
 	"github.com/S-Nakamur-a/gitfilm/internal/replay"
+	"github.com/S-Nakamur-a/gitfilm/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -65,13 +66,23 @@ func run(branch string, opts options) error {
 			branch, opts.against, opts.mode, opts.maxN, opts.subdir)
 	}
 
-	loadStart := time.Now()
-	frames, err := loader.Load(gitlog.LoadRequest{
+	req := gitlog.LoadRequest{
 		Branch:  branch,
 		Against: opts.against,
 		SubDir:  opts.subdir,
 		MaxN:    opts.maxN,
-	})
+	}
+
+	// TUI takes the streaming path: first paint happens as soon as the
+	// oldest shard arrives instead of after the full Load. Skips the
+	// renderer registry because output.Renderer.Run wants a complete
+	// History upfront, which defeats the point.
+	if opts.mode == "tui" && !opts.stats {
+		return tui.RunStream(loader, req)
+	}
+
+	loadStart := time.Now()
+	frames, err := loader.Load(req)
 	loadDur := time.Since(loadStart)
 	if err != nil {
 		return fmt.Errorf("load history: %w", err)

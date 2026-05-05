@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/S-Nakamur-a/gitfilm/internal/gitlog"
 	"github.com/S-Nakamur-a/gitfilm/internal/model"
 	"github.com/S-Nakamur-a/gitfilm/internal/replay"
 	tea "github.com/charmbracelet/bubbletea"
@@ -31,13 +32,45 @@ func tick() tea.Cmd {
 	return tea.Tick(frameTickMS, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
+// batchMsg / batchEndMsg drive the streaming-loader integration. Init
+// kicks off a waitForBatch Cmd that resolves on the next channel send;
+// Update processes the batch and (unless Done) re-arms the wait. This
+// keeps the model single-threaded — no need to lock state across the
+// loader goroutine and the TUI's event loop.
+type batchMsg gitlog.LoadBatch
+type batchEndMsg struct{}
+
+func waitForBatch(ch <-chan gitlog.LoadBatch) tea.Cmd {
+	return func() tea.Msg {
+		b, ok := <-ch
+		if !ok {
+			return batchEndMsg{}
+		}
+		return batchMsg(b)
+	}
+}
+
 type programModel struct {
 	history model.History
 	tree    *replay.TreeState
-	// snapshots[i] is a TreeState clone taken AFTER stepping through
+	// headTree mirrors the deepest loaded commit, regardless of where
+	// the user has scrubbed. Snapshot bucketing is driven by headTree
+	// (so backward-navigation cache stays correct as commits stream
+	// in), while m.tree continues to track the user's current idx.
+	headTree *replay.TreeState
+	// snapshots[i] is a headTree clone taken AFTER stepping through
 	// commits[0..i*snapshotInterval]. Used to skip most of the replay
 	// when jumping backwards on large histories.
 	snapshots []*replay.TreeState
+
+	// Streaming state. loadCh is nil when the program was given a
+	// pre-built history (legacy/sync path); when non-nil, the model
+	// pulls commits in batches and grows m.history over time.
+	loadCh      <-chan gitlog.LoadBatch
+	loadTotal   int
+	loading     bool
+	loadErr     error
+	pausedAtEnd bool // set when autoplay hit the loaded end mid-stream
 
 	idx          int // current commit index (0-based, oldest first)
 	playing      bool
@@ -49,6 +82,16 @@ type programModel struct {
 
 func runProgram(h model.History) error {
 	m := newModel(h)
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	_, err := p.Run()
+	return err
+}
+
+// runStreamingProgram drives the TUI off a streaming loader. The
+// channel is consumed inside Update via waitForBatch so all state
+// mutations stay on the Bubble Tea event-loop goroutine.
+func runStreamingProgram(branch, against string, ch <-chan gitlog.LoadBatch) error {
+	m := newStreamingModel(branch, against, ch)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
@@ -71,7 +114,24 @@ func newModel(h model.History) programModel {
 	return m
 }
 
-func (m programModel) Init() tea.Cmd { return tick() }
+func newStreamingModel(branch, against string, ch <-chan gitlog.LoadBatch) programModel {
+	return programModel{
+		history:  model.History{Branch: branch, Against: against},
+		tree:     replay.NewTreeState(replay.DefaultHalfLife),
+		headTree: replay.NewTreeState(replay.DefaultHalfLife),
+		loadCh:   ch,
+		loading:  true,
+		idx:      0,
+		playing:  true,
+	}
+}
+
+func (m programModel) Init() tea.Cmd {
+	if m.loadCh != nil {
+		return tea.Batch(tick(), waitForBatch(m.loadCh))
+	}
+	return tick()
+}
 
 func (m programModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -111,13 +171,80 @@ func (m programModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.idx < len(m.history.Commits)-1 {
 					m.advance(1)
 				} else {
+					// End of LOADED range. If still streaming, mark for
+					// auto-resume so the next batch pulls playback
+					// forward without the user having to press space.
+					if m.loading {
+						m.pausedAtEnd = true
+					}
 					m.playing = false
 				}
 			}
 		}
 		return m, tick()
+	case batchMsg:
+		return m.applyBatch(gitlog.LoadBatch(msg))
+	case batchEndMsg:
+		// Loader closed the channel without a Done batch (shouldn't
+		// happen by protocol, but be defensive).
+		m.loading = false
+		return m, nil
 	}
 	return m, nil
+}
+
+// applyBatch appends new commits, steps the head tree, populates
+// snapshot buckets, and arranges autoplay to resume if it had paused
+// at the previously-loaded end. Single-threaded relative to Update so
+// no locking needed.
+func (m programModel) applyBatch(b gitlog.LoadBatch) (tea.Model, tea.Cmd) {
+	if b.Err != nil {
+		m.loadErr = b.Err
+		m.loading = false
+		return m, nil
+	}
+	if b.Total > 0 {
+		m.loadTotal = b.Total
+	}
+	if len(b.Commits) > 0 {
+		startIdx := len(m.history.Commits)
+		m.history.Commits = append(m.history.Commits, b.Commits...)
+		if m.headTree == nil {
+			m.headTree = replay.NewTreeState(replay.DefaultHalfLife)
+		}
+		for i := range b.Commits {
+			m.headTree.Step(b.Commits[i])
+			absIdx := startIdx + i
+			// Snapshot bucket boundary — clone headTree so backward
+			// navigation can rewind to here without replaying from 0.
+			if (absIdx+1)%snapshotInterval == 0 {
+				bucket := absIdx / snapshotInterval
+				for len(m.snapshots) <= bucket {
+					m.snapshots = append(m.snapshots, nil)
+				}
+				if m.snapshots[bucket] == nil {
+					m.snapshots[bucket] = m.headTree.Clone()
+				}
+			}
+		}
+		// First batch: bootstrap m.tree at idx=0 so the first frame
+		// has something to render.
+		if startIdx == 0 && len(m.history.Commits) > 0 {
+			m.tree = replay.NewTreeState(replay.DefaultHalfLife)
+			m.tree.Step(m.history.Commits[0])
+			m.commitDwell = replay.DwellFor(m.history.Commits[0])
+		}
+		if m.pausedAtEnd {
+			m.pausedAtEnd = false
+			m.playing = true
+			m.dwellElapsed = 0
+		}
+	}
+	if b.Done {
+		m.loading = false
+		return m, nil
+	}
+	return m, waitForBatch(m.loadCh)
 }
 
 // advance moves idx by n (clamped) and replays the tree state.
@@ -210,8 +337,17 @@ var (
 )
 
 func (m programModel) View() string {
-	if m.width == 0 || len(m.history.Commits) == 0 {
+	if m.width == 0 {
 		return "loading…"
+	}
+	if len(m.history.Commits) == 0 {
+		if m.loadErr != nil {
+			return styleDel.Render("load error: " + m.loadErr.Error())
+		}
+		if m.loadTotal > 0 {
+			return fmt.Sprintf("loading commits… (0 / %d)", m.loadTotal)
+		}
+		return "loading commits…"
 	}
 	cur := m.history.Commits[m.idx]
 
@@ -542,6 +678,13 @@ func (m programModel) renderFooter() string {
 			lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("█"),
 	}, "  ")
 	hint := styleDim.Render("space: play/pause   ←/→: step   shift+←/→: ±10   g/G: ends   q: quit")
+	if m.loadErr != nil {
+		hint = styleDel.Render("load error: "+m.loadErr.Error()) + "  " + hint
+	} else if m.loading && m.loadTotal > 0 {
+		pct := len(m.history.Commits) * 100 / m.loadTotal
+		hint = styleNew.Render(fmt.Sprintf("loading %d/%d (%d%%)",
+			len(m.history.Commits), m.loadTotal, pct)) + "  " + hint
+	}
 	w := m.width
 	if w <= 0 {
 		w = 80

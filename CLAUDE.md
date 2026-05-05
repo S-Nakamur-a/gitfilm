@@ -77,6 +77,15 @@ adding one package and one blank-import in `cmd/git-film/main.go`. The
   `maxFilesPerCommit` in `diffparse.go`). These bound memory on pathological
   commits without changing what the user sees.
 - `git log` is invoked with `--unified=1` to keep context lines minimal.
+- `LoadStream` (in `streaming.go`) is the progressive variant: same
+  shard plan as `loadCommitsBatched`, but workers tag + reverse each
+  shard then send into a `results` channel, and a delivery goroutine
+  emits batches in **oldest-first shard order** (highest shard index
+  first). Out-of-order shard completions buffer in `pending`. The
+  channel returned by `LoadStream` carries `LoadBatch{Commits, Total,
+  Done, Err}` and is closed when streaming ends. Used by the TUI for
+  ~1s first paint instead of waiting on the slowest shard. The HTML
+  renderer and `--stats` keep using the synchronous `Load`.
 
 ### Model (`internal/model`)
 
@@ -118,16 +127,32 @@ once — both backends pick it up.
 
 ### TUI (`internal/tui`)
 
-- Bubble Tea + Lipgloss. Entry: `Run` (kept for compat) and the
-  `output.Renderer` registered in `init()` → `runProgram` →
-  `programModel`. Imports `internal/replay` for all playback math.
+- Bubble Tea + Lipgloss. Entries:
+  - `Run(History)` — fully-loaded history (compat / tests).
+  - `RunStream(loader, req)` — streaming, used by the CLI.
+  - `output.Renderer` (registered in `init()`) — non-streaming fallback.
+  Imports `internal/replay` for all playback math and `internal/gitlog`
+  for the streaming `LoadBatch` type.
 - TUI-only knobs in `program.go`: `frameTickMS`, `snapshotInterval`.
   Pacing knobs (`UnitsPerSecond` etc.) are in `replay`.
+- **Streaming consumption**: `programModel.loadCh` is non-nil when the
+  program was started via `RunStream`. `Init` arms a `waitForBatch` Cmd;
+  each `batchMsg` calls `applyBatch` which appends commits to history,
+  steps the head tree, and populates snapshot buckets. Single-threaded
+  on the Bubble Tea event-loop goroutine, so no locking. First paint is
+  bound by the OLDEST shard's completion, not the full Load.
+- **Two tree states**: `m.tree` tracks the user's current `idx` (existing
+  semantics); `m.headTree` tracks the deepest loaded commit so snapshot
+  bucketing stays correct as commits stream in.
+- **Auto-resume at stream end**: when autoplay reaches the loaded end
+  while still loading, set `pausedAtEnd` and pause; the next batch
+  unpauses so playback flows naturally as more commits arrive.
 - **Backward-navigation cache**: `programModel.snapshots[]` stores a
   `replay.TreeState.Clone()` every `snapshotInterval` (100) commits.
   Jumping back rewinds to the nearest snapshot and replays at most that
-  many commits instead of the whole prefix. Forward jumps step normally
-  and call `maybeSnapshot` on bucket boundaries.
+  many commits instead of the whole prefix. Forward jumps step normally;
+  in the streaming path, `applyBatch` populates the bucket as it crosses
+  boundaries during loading.
 - `clipPane` ANSI-aware truncation prevents colored content from spilling
   between the left/right panes — a regression source historically (see commit
   `9c6af38`). Use it for any new pane content.
@@ -154,9 +179,12 @@ payloads dominate file size.
 
 - `Renderer` interface: `Run(History, Config, diag io.Writer) error`.
 - `Register(name, Renderer)` is called from each backend's `init()`.
-- `cli/root.go` dispatches via `output.Get(opts.mode)`. The CLI does not
-  import `internal/tui` or `internal/htmlout` — `cmd/git-film/main.go`
-  blank-imports both so registration happens at startup.
+- `cli/root.go` dispatches batch-style outputs (HTML, stats) via
+  `output.Get(opts.mode)`. **TUI is special-cased** to use
+  `tui.RunStream(loader, req)` — the renderer interface wants a
+  complete `model.History` upfront, which defeats progressive load.
+  `cli/root.go` therefore imports `internal/tui` directly. The
+  registered TUI renderer remains as a non-streaming fallback.
 
 ## Conventions
 
