@@ -60,10 +60,20 @@
     position: sticky; bottom: 0; background: var(--bg);
     border-top: 1px solid #21262d; padding: 8px 16px;
   }
-  .timeline { display: flex; height: 12px; border-radius: 2px; overflow: hidden; }
-  .timeline span { display: block; height: 100%; }
-  .timeline .feat { background: var(--feat); }
-  .timeline .against { background: var(--against); }
+  .timeline-wrap { position: relative; height: 18px; }
+  .timeline { display: flex; height: 12px; border-radius: 2px; overflow: hidden; position: absolute; left: 0; right: 0; top: 0; }
+  .timeline span.seg { display: block; height: 100%; }
+  .timeline span.seg.feat { background: var(--feat); }
+  .timeline span.seg.against { background: var(--against); }
+  .timeline-caret {
+    position: absolute; top: 0; width: 2px; height: 18px;
+    background: var(--new); transition: left 80ms linear;
+    box-shadow: 0 0 6px var(--new);
+  }
+  .timeline-caret::after {
+    content: '▼'; position: absolute; top: -10px; left: -5px;
+    font-size: 10px; color: var(--new);
+  }
   .controls { display: flex; gap: 8px; align-items: center; margin-top: 6px; color: var(--dim); }
   .controls button { background: #21262d; color: var(--fg); border: 0; padding: 4px 10px; border-radius: 3px; cursor: pointer; }
   .controls input[type=range] { flex: 1; }
@@ -89,7 +99,10 @@
   </section>
 </main>
 <footer>
-  <div class="timeline" id="timeline"></div>
+  <div class="timeline-wrap">
+    <div class="timeline" id="timeline"></div>
+    <div class="timeline-caret" id="caret"></div>
+  </div>
   <div class="controls">
     <button id="play">▶</button>
     <button id="prev">◀</button>
@@ -256,19 +269,32 @@
       if (i === commits.length || commits[i].tag !== commits[i - 1].tag) {
         const tag = commits[i - 1].tag;
         const w = ((i - runStart) / commits.length) * 100;
-        tl.appendChild(el('span', { class: tag, style: 'width:' + w + '%' }));
+        tl.appendChild(el('span', { class: 'seg ' + tag, style: 'width:' + w + '%' }));
         runStart = i;
       }
     }
     document.getElementById('scrubber').max = String(commits.length - 1);
   }
 
+  function updateCaret() {
+    if (!commits.length) return;
+    const pct = (idx / Math.max(1, commits.length - 1)) * 100;
+    document.getElementById('caret').style.left = 'calc(' + pct + '% - 1px)';
+  }
+
+  // Mirror the renderer: only the first hunk is shown, and only the
+  // first VISIBLE_LINES lines of it. Anything beyond that is invisible
+  // and shouldn't extend the dwell time.
+  const VISIBLE_LINES = 6;
+
   function fileBudget(f) {
+    if (!f.hunks.length) return 8;
+    const h = f.hunks[0];
     let total = 0;
-    for (let hi = 0; hi < f.hunks.length; hi++) {
-      const h = f.hunks[hi];
-      for (const l of h.lines) total += l.k === '+' ? l.t.length : 4;
-      if (hi < f.hunks.length - 1) total += 6;
+    const n = Math.min(VISIBLE_LINES, h.lines.length);
+    for (let i = 0; i < n; i++) {
+      const l = h.lines[i];
+      total += l.k === '+' ? l.t.length : 4;
     }
     return Math.max(8, total);
   }
@@ -282,48 +308,70 @@
     return Math.max(8, max);
   }
 
+  // Animate only the first hunk's first VISIBLE_LINES lines. Once
+  // those finish typing, mark the file done — the user wouldn't see
+  // anything more anyway, so we shouldn't make them wait.
   function applyFileAnim(f, budget) {
+    if (!f.hunks.length) return { hi: 0, li: 0, chars: -1, done: true };
     if (budget <= 0) return { hi: 0, li: 0, chars: 0, done: false };
+    const h = f.hunks[0];
+    const n = Math.min(VISIBLE_LINES, h.lines.length);
     let rem = budget;
-    for (let hi = 0; hi < f.hunks.length; hi++) {
-      const h = f.hunks[hi];
-      for (let li = 0; li < h.lines.length; li++) {
-        const l = h.lines[li];
-        if (l.k === '+') {
-          const n = l.t.length;
-          if (rem < n) return { hi, li, chars: rem, done: false };
-          rem -= n;
-        } else {
-          if (rem < 4) return { hi, li, chars: 0, done: false };
-          rem -= 4;
-        }
-      }
-      if (hi < f.hunks.length - 1) {
-        if (rem < 6) return { hi: hi + 1, li: 0, chars: 0, done: false };
-        rem -= 6;
+    for (let li = 0; li < n; li++) {
+      const l = h.lines[li];
+      if (l.k === '+') {
+        const len = l.t.length;
+        if (rem < len) return { hi: 0, li, chars: rem, done: false };
+        rem -= len;
+      } else {
+        if (rem < 4) return { hi: 0, li, chars: 0, done: false };
+        rem -= 4;
       }
     }
     return { hi: 0, li: 0, chars: -1, done: true };
   }
 
   function consumedFor(f, anim) {
-    if (anim.done) return fileBudget(f);
+    if (anim.done || !f.hunks.length) return fileBudget(f);
+    const h = f.hunks[0];
+    const n = Math.min(VISIBLE_LINES, h.lines.length);
     let consumed = 0;
-    for (let hi = 0; hi < f.hunks.length; hi++) {
-      const h = f.hunks[hi];
-      if (hi > anim.hi) break;
-      for (let li = 0; li < h.lines.length; li++) {
-        if (hi === anim.hi && li > anim.li) break;
-        const l = h.lines[li];
-        if (hi === anim.hi && li === anim.li) {
-          consumed += l.k === '+' ? anim.chars : 0;
-          break;
-        }
-        consumed += l.k === '+' ? l.t.length : 4;
+    for (let li = 0; li < n; li++) {
+      if (li > anim.li) break;
+      const l = h.lines[li];
+      if (li === anim.li) {
+        consumed += l.k === '+' ? anim.chars : 0;
+        break;
       }
-      if (hi < anim.hi && hi < f.hunks.length - 1) consumed += 6;
+      consumed += l.k === '+' ? l.t.length : 4;
     }
     return consumed;
+  }
+
+  // relativeAge formats a unix timestamp as "5 days ago", "2 years ago",
+  // etc. Picks the largest unit that yields >= 1, with no decimals so
+  // it stays glanceable. Falls back to "" if when_unix is missing.
+  function relativeAge(unix) {
+    if (!unix) return '';
+    const diffMs = Date.now() - unix * 1000;
+    const sec = Math.round(diffMs / 1000);
+    if (sec < 0) return 'in the future';
+    const units = [
+      [60, 'second'],
+      [60, 'minute'],
+      [24, 'hour'],
+      [7, 'day'],
+      [4.345, 'week'],
+      [12, 'month'],
+      [Number.POSITIVE_INFINITY, 'year'],
+    ];
+    let n = sec;
+    for (let i = 0; i < units.length; i++) {
+      const [factor, label] = units[i];
+      if (n < factor) return n + ' ' + label + (n === 1 ? '' : 's') + ' ago';
+      n = Math.floor(n / factor);
+    }
+    return n + ' years ago';
   }
 
   function renderCommitMeta(c) {
@@ -332,7 +380,10 @@
     const author = document.getElementById('commit-author');
     clear(author);
     const short = c.short || (c.hash ? c.hash.slice(0, 7) : '');
-    author.appendChild(document.createTextNode((c.author_name || '') + ' · ' + (c.when || '') + ' · '));
+    const rel = relativeAge(c.when_unix);
+    const datePart = c.when || '';
+    const dateLabel = rel ? datePart + ' (' + rel + ')' : datePart;
+    author.appendChild(document.createTextNode((c.author_name || '') + ' · ' + dateLabel + ' · '));
     author.appendChild(el('span', { class: 'badge ' + c.tag }, c.tag));
     author.appendChild(document.createTextNode(' · ' + short));
   }
@@ -436,6 +487,7 @@
       document.getElementById('counter').textContent = (idx + 1) + '/' + commits.length;
       document.getElementById('scrubber').value = String(idx);
       renderTree(snapshots[idx]);
+      updateCaret();
       lastIdxRendered = idx;
       lastRightSig = '';
     }
@@ -482,7 +534,28 @@
     idx = parseInt(e.target.value, 10) || 0; progress = 0;
   });
 
+  // Keyboard navigation: ←/→ step by 1 commit, Shift+←/→ by 10,
+  // Home/End jump to ends, Space toggles play.
+  window.addEventListener('keydown', (e) => {
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+    let step = 0;
+    if (e.key === 'ArrowRight') step = e.shiftKey ? 10 : 1;
+    else if (e.key === 'ArrowLeft') step = e.shiftKey ? -10 : -1;
+    else if (e.key === 'Home') { idx = 0; progress = 0; e.preventDefault(); return; }
+    else if (e.key === 'End') { idx = commits.length - 1; progress = 0; e.preventDefault(); return; }
+    else if (e.key === ' ') {
+      playing = !playing;
+      document.getElementById('play').textContent = playing ? '❚❚' : '▶';
+      e.preventDefault();
+      return;
+    } else { return; }
+    idx = Math.max(0, Math.min(commits.length - 1, idx + step));
+    progress = 0;
+    e.preventDefault();
+  });
+
   renderTimeline();
+  updateCaret();
   render();
   requestAnimationFrame(loop);
 })();

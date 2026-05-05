@@ -56,6 +56,7 @@ type commitJSON struct {
 	Short      string     `json:"short"`
 	AuthorName string     `json:"author_name"`
 	When       string     `json:"when"`
+	WhenUnix   int64      `json:"when_unix"`
 	Subject    string     `json:"subject"`
 	Body       string     `json:"body,omitempty"`
 	Tag        string     `json:"tag"`
@@ -94,6 +95,7 @@ func buildPayload(h model.History) payload {
 			Short:      c.ShortHash,
 			AuthorName: c.AuthorName,
 			When:       c.When.Format("2006-01-02 15:04"),
+			WhenUnix:   c.When.Unix(),
 			Subject:    c.Subject,
 			Body:       c.Body,
 			Tag:        tagJSON(c.Tag),
