@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
-	"github.com/S-Nakamur-a/gitplay/internal/replay"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/replay"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -253,7 +253,7 @@ func (m programModel) View() string {
 func (m programModel) renderHeader(c model.Commit) string {
 	tag := tagLabel(c.Tag)
 	return styleTitle.Render(fmt.Sprintf(
-		"gitplay  %s ⇒ %s   commit %d/%d   %s   %s   %s",
+		"gitfilm  %s ⇒ %s   commit %d/%d   %s   %s   %s",
 		m.history.Branch, m.history.Against,
 		m.idx+1, len(m.history.Commits),
 		c.When.Format("2006-01-02 15:04"),

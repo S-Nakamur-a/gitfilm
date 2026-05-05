@@ -3,7 +3,7 @@ package gitlog
 import (
 	"testing"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
 )
 
 const sampleDiff = `diff --git a/src/parser/lexer.go b/src/parser/lexer.go

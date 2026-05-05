@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
 )
 
 // DefaultHalfLife is the heat half-life (in commits) used by the live

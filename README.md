@@ -1,15 +1,18 @@
-# gitplay
+# gitfilm
 
 Replay your git history as an animation in the terminal — or as a single
 self-contained HTML file you can share.
 
 ```sh
-go install github.com/S-Nakamur-a/gitplay/cmd/git-play@latest
+# install (places `git-film` onto $GOBIN)
+make install
+# or directly:
+go install github.com/S-Nakamur-a/gitfilm/cmd/git-film@latest
 
-# git automatically routes "git play ..." to the git-play binary.
-git play feat/xyz --against main          # TUI (default)
-git play feat/xyz --against main -o html  # writes gitplay.html
-git play feat/xyz --against main --stats  # load time / dwell distribution
+# git automatically routes "git film ..." to the git-film binary.
+git film feat/xyz --against main          # TUI (default)
+git film feat/xyz --against main -o html  # writes gitfilm.html
+git film feat/xyz --against main --stats  # load time / dwell distribution
 ```
 
 ## What it does
@@ -29,7 +32,7 @@ git play feat/xyz --against main --stats  # load time / dwell distribution
   colors.
 
 The same data drives both the TUI and the HTML output, so the HTML
-build is just `go run ./cmd/git-play -o html` away.
+build is just `go run ./cmd/git-film -o html` away.
 
 ## Useful flags
 
@@ -40,7 +43,7 @@ build is just `go run ./cmd/git-play -o html` away.
 | `--max` | `500` | cap commits loaded; `0` = no limit |
 | `--path` | "" | only show changes under this subdirectory |
 | `--repo` | `.` | path to the git repository |
-| `--html-out` | `gitplay.html` | output file when `-o html` |
+| `--html-out` | `gitfilm.html` | output file when `-o html` |
 | `--stats` | off | print load time / dwell distribution and exit |
 
 ## Performance notes

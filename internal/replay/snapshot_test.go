@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
 )
 
 func TestTreeState_CloneIsIndependent(t *testing.T) {

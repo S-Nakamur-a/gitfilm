@@ -11,12 +11,12 @@ package replay
 import (
 	"unicode"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
 )
 
 // Animation cost constants. One "unit" ≈ one character of typing speed.
 // Pacing knobs (UnitsPerSecond etc.) are calibrated against these — re-run
-// `git-play --stats` after any change.
+// `git-film --stats` after any change.
 const (
 	// LineCost is the visual cost of a full removed/context line.
 	LineCost = 4

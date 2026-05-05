@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
 )
 
 // fakeRunner answers a few git invocations from canned output.

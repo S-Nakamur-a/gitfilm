@@ -3,8 +3,8 @@ package tui
 import (
 	"io"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
-	"github.com/S-Nakamur-a/gitplay/internal/output"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/output"
 )
 
 // Run is the historical entrypoint kept for any internal callers. The

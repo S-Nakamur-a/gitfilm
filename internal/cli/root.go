@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/S-Nakamur-a/gitplay/internal/gitlog"
-	"github.com/S-Nakamur-a/gitplay/internal/model"
-	"github.com/S-Nakamur-a/gitplay/internal/output"
-	"github.com/S-Nakamur-a/gitplay/internal/replay"
+	"github.com/S-Nakamur-a/gitfilm/internal/gitlog"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/output"
+	"github.com/S-Nakamur-a/gitfilm/internal/replay"
 	"github.com/spf13/cobra"
 )
 
@@ -30,9 +30,9 @@ type options struct {
 func New() *cobra.Command {
 	var opts options
 	cmd := &cobra.Command{
-		Use:   "git-play <branch>",
+		Use:   "git-film <branch>",
 		Short: "Replay your git history as an animation",
-		Long: "gitplay walks a branch with --first-parent, tags commits by their\n" +
+		Long: "git-film walks a branch with --first-parent, tags commits by their\n" +
 			"originating branch (split at merge-base with --against), and replays\n" +
 			"the diffs as an animation in the terminal or a single HTML file.",
 		Args: cobra.ExactArgs(1),
@@ -44,7 +44,7 @@ func New() *cobra.Command {
 	cmd.Flags().StringVarP(&opts.mode, "output", "o", "tui", "output mode: "+strings.Join(output.Names(), " | "))
 	cmd.Flags().StringVar(&opts.repo, "repo", ".", "path to the git repository")
 	cmd.Flags().StringVar(&opts.subdir, "path", "", "limit to changes under this subdirectory (relative to repo root)")
-	cmd.Flags().StringVar(&opts.htmlOut, "html-out", "gitplay.html", "html output file path (when -o html)")
+	cmd.Flags().StringVar(&opts.htmlOut, "html-out", "gitfilm.html", "html output file path (when -o html)")
 	cmd.Flags().IntVar(&opts.maxN, "max", 500, "limit to the most recent N commits (0 = no limit, careful on big repos)")
 	cmd.Flags().BoolVar(&opts.stats, "stats", false, "print load time, dwell distribution, and per-commit stats; do not render")
 	return cmd
@@ -119,7 +119,7 @@ func printStats(w *os.File, h model.History, loadDur time.Duration) {
 		}
 	}
 
-	fmt.Fprintf(w, "=== gitplay stats: %s ⇒ %s ===\n", h.Branch, h.Against)
+	fmt.Fprintf(w, "=== gitfilm stats: %s ⇒ %s ===\n", h.Branch, h.Against)
 	fmt.Fprintf(w, "load time:        %s\n", loadDur.Round(time.Millisecond))
 	fmt.Fprintf(w, "commits:          %d\n", len(h.Commits))
 	fmt.Fprintf(w, "files (sum):      %d  (avg %.1f / commit)\n", filesTotal, float64(filesTotal)/float64(len(h.Commits)))

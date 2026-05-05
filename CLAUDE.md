@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-`gitplay` is a Go CLI (`git-play`, invokable as `git play …` because git auto-routes
+`gitfilm` is a Go CLI (`git-film`, invokable as `git film …` because git auto-routes
 unknown subcommands to a `git-<name>` binary) that replays a branch's history as
 either a Bubble Tea TUI animation or a single self-contained HTML file. The
 binary walks the target branch with `--first-parent`, splits commits at the
@@ -13,10 +13,10 @@ merge-base with `--against`, and animates per-file diffs.
 ## Common commands
 
 ```sh
-go build ./cmd/git-play           # build the binary into ./git-play
-go install ./cmd/git-play         # install onto $GOBIN
-go run ./cmd/git-play <branch>    # quick local run (TUI)
-go test ./...                     # run the full test suite
+make build                        # build the binary into ./git-film
+make install                      # install onto $GOBIN as git-film
+go run ./cmd/git-film <branch>  # quick local run (TUI)
+make test                         # run the full test suite (= go test ./...)
 go test ./internal/tui -run TestStep_Rename   # single test by name
 go vet ./...
 gofmt -l .                        # list files needing formatting
@@ -42,7 +42,7 @@ The data model is **renderer-agnostic**, and playback policy lives in a
 source. Those are the two central design constraints.
 
 ```
-cmd/git-play
+cmd/git-film
    └─ blank-imports internal/htmlout, internal/tui  (registers them)
    └─ internal/cli           Cobra command, flag parsing, --stats reporter
         └─ internal/output   Renderer interface + name registry
@@ -56,7 +56,7 @@ cmd/git-play
 `model.History` is the contract between the loader and any renderer. The
 `internal/output` package is the contract between the CLI and any
 renderer — backends self-register from `init()` so adding a format means
-adding one package and one blank-import in `cmd/git-play/main.go`. The
+adding one package and one blank-import in `cmd/git-film/main.go`. The
 `cli` package no longer imports backends directly.
 
 ### Loader (`internal/gitlog`)
@@ -69,8 +69,8 @@ adding one package and one blank-import in `cmd/git-play/main.go`. The
   (`runtime.NumCPU()`, capped at 8) using `--skip M -n K`. This is the reason
   large monorepos load fast — fork/exec cost is paid per shard, not per commit.
   Tune `targetShard` (currently 1000 commits) only with the `--stats` harness.
-- The parser uses **marker lines** (`__GITPLAY_BEGIN__` / `__GITPLAY_BODY__` /
-  `__GITPLAY_END__`) wrapped via `--format=...` to separate metadata from diff
+- The parser uses **marker lines** (`__GITFILM_BEGIN__` / `__GITFILM_BODY__` /
+  `__GITFILM_END__`) wrapped via `--format=...` to separate metadata from diff
   output. Don't switch to `--numstat`: the TUI's typing animation needs full
   hunk text.
 - `parseFileDiffs` enforces **soft caps** (`maxLinesPerHunk`, `maxHunksPerFile`,
@@ -155,7 +155,7 @@ payloads dominate file size.
 - `Renderer` interface: `Run(History, Config, diag io.Writer) error`.
 - `Register(name, Renderer)` is called from each backend's `init()`.
 - `cli/root.go` dispatches via `output.Get(opts.mode)`. The CLI does not
-  import `internal/tui` or `internal/htmlout` — `cmd/git-play/main.go`
+  import `internal/tui` or `internal/htmlout` — `cmd/git-film/main.go`
   blank-imports both so registration happens at startup.
 
 ## Conventions
@@ -165,5 +165,5 @@ payloads dominate file size.
 - Tests use the `Runner` injection pattern (`gitlog.NewLoaderWithRunner`) for
   loader behavior, and direct construction for `TreeState` / `programModel`.
   No external test fixtures — everything is built inline.
-- `internal/...` is enforced for everything that isn't `cmd/git-play/main.go`.
+- `internal/...` is enforced for everything that isn't `cmd/git-film/main.go`.
   Keep it that way unless someone genuinely needs to import the model.

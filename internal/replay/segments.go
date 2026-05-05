@@ -1,6 +1,6 @@
 package replay
 
-import "github.com/S-Nakamur-a/gitplay/internal/model"
+import "github.com/S-Nakamur-a/gitfilm/internal/model"
 
 // Segment is a contiguous run of commits sharing the same BranchTag.
 // Used to draw the colored timeline at the bottom of any renderer.

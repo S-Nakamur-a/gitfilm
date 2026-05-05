@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
 )
 
 func sampleHistory() model.History {
@@ -42,7 +42,7 @@ func TestRender_ContainsExpectedMarkers(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
-		"<title>gitplay — feat/x</title>",
+		"<title>gitfilm — feat/x</title>",
 		`id="data"`,
 		`"branch":"feat/x"`,
 		`"against":"main"`,

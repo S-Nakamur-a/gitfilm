@@ -15,16 +15,16 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
-	"github.com/S-Nakamur-a/gitplay/internal/output"
-	"github.com/S-Nakamur-a/gitplay/internal/replay"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/output"
+	"github.com/S-Nakamur-a/gitfilm/internal/replay"
 )
 
 //go:embed template.html
 var templateHTML string
 
 // DefaultOutputPath is used when output.Config.HTMLOutPath is empty.
-const DefaultOutputPath = "gitplay.html"
+const DefaultOutputPath = "gitfilm.html"
 
 // Render writes a single self-contained HTML file representing the
 // history. The page embeds all commit data, precomputed playback
@@ -33,7 +33,7 @@ const DefaultOutputPath = "gitplay.html"
 // DOM updates.
 func Render(w io.Writer, h model.History) error {
 	payload := buildPayload(h)
-	tmpl, err := template.New("gitplay").Parse(templateHTML)
+	tmpl, err := template.New("gitfilm").Parse(templateHTML)
 	if err != nil {
 		return err
 	}

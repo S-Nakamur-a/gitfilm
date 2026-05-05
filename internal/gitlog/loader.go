@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
 )
 
 type Loader struct {
@@ -245,9 +245,9 @@ func (l *Loader) featureSet(branch, against string) (map[string]struct{}, error)
 // diff content; if they ever do, we'd misparse a single commit but
 // not crash.
 const (
-	beginMarker     = "__GITPLAY_BEGIN__"
-	bodyOpenMarker  = "__GITPLAY_BODY__"
-	bodyCloseMarker = "__GITPLAY_END__"
+	beginMarker     = "__GITFILM_BEGIN__"
+	bodyOpenMarker  = "__GITFILM_BODY__"
+	bodyCloseMarker = "__GITFILM_END__"
 )
 
 // parseLogP scans the streamed output of `git log -p --format=...`
@@ -255,17 +255,17 @@ const (
 //
 // Each commit chunk looks like:
 //
-//	__GITPLAY_BEGIN__
+//	__GITFILM_BEGIN__
 //	<hash>
 //	<short>
 //	<author name>
 //	<author email>
 //	<unix time>
 //	<subject>
-//	__GITPLAY_BODY__
+//	__GITFILM_BODY__
 //	<body line 1>
 //	<body line 2>
-//	__GITPLAY_END__
+//	__GITFILM_END__
 //	<diff lines for this commit, until the next BEGIN marker>
 func parseLogP(b []byte, subdir string) ([]model.Commit, error) {
 	var commits []model.Commit

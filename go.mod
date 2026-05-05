@@ -1,4 +1,4 @@
-module github.com/S-Nakamur-a/gitplay
+module github.com/S-Nakamur-a/gitfilm
 
 go 1.25.0
 

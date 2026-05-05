@@ -9,21 +9,21 @@ import (
 	"io"
 	"sort"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
 )
 
 // Config carries optional per-renderer settings. Renderers ignore
 // fields they don't care about.
 type Config struct {
 	// HTMLOutPath is the destination file for the html renderer. Empty
-	// string falls back to the renderer's default ("gitplay.html").
+	// string falls back to the renderer's default ("gitfilm.html").
 	HTMLOutPath string
 }
 
 // Renderer renders a model.History according to the given config.
 // Implementations may take over the terminal (TUI), write to a file
 // (HTML), or anything else; renderers that produce diagnostic output
-// (e.g. "wrote gitplay.html") write it to diag, leaving stdout free
+// (e.g. "wrote gitfilm.html") write it to diag, leaving stdout free
 // for any data they want to emit.
 type Renderer interface {
 	Run(h model.History, cfg Config, diag io.Writer) error

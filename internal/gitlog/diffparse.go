@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
 )
 
 func unixToTime(unix int64) time.Time { return time.Unix(unix, 0) }

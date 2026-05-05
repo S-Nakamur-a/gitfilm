@@ -3,12 +3,12 @@ package replay
 import (
 	"time"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
 )
 
 // Pacing knobs. Vars (not consts) so tests / future flags can override.
 // All values are calibrated together — bumping one in isolation usually
-// breaks dwell feel; re-run `git-play --stats` after changes.
+// breaks dwell feel; re-run `git-film --stats` after changes.
 var (
 	// UnitsPerSecond controls how fast we burn through the per-file
 	// animation budget. ~200 unit/s feels brisk without losing the

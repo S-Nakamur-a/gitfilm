@@ -3,7 +3,7 @@ package replay
 import (
 	"testing"
 
-	"github.com/S-Nakamur-a/gitplay/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/model"
 )
 
 func collectFiles(n *TreeNode, into map[string]*TreeNode) {
