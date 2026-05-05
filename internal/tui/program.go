@@ -664,7 +664,13 @@ func renderFileCard(f model.FileChange, a replay.FileAnim, width int) string {
 }
 
 func (m programModel) renderFooter() string {
-	bar := m.renderTimelineBar(m.width - 4)
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	barW := w - 4
+	progress := m.renderCommitProgress(barW)
+	bar := m.renderTimelineBar(barW)
 	legend := strings.Join([]string{
 		styleFeat.Render("█ feat"),
 		styleAgst.Render("█ " + m.history.Against),
@@ -685,46 +691,95 @@ func (m programModel) renderFooter() string {
 		hint = styleNew.Render(fmt.Sprintf("loading %d/%d (%d%%)",
 			len(m.history.Commits), m.loadTotal, pct)) + "  " + hint
 	}
-	w := m.width
-	if w <= 0 {
-		w = 80
-	}
-	return clipPane(bar+"\n"+legend+"\n"+hint, w, 3)
+	parts := []string{progress, bar, legend, hint}
+	out := strings.Join(parts, "\n")
+	return clipPane(out, w, len(parts)+1) // +1 for the caret line inside renderTimelineBar
 }
 
+// renderCommitProgress draws a one-line bar for the active commit:
+// elapsed dwell vs. its total dwell. Sits directly above the timeline
+// strip so the eye reads "where in *this* commit" / "where in the
+// *whole* film" as two stacked axes.
+func (m programModel) renderCommitProgress(width int) string {
+	if width < 4 || len(m.history.Commits) == 0 {
+		return ""
+	}
+	frac := 0.0
+	if m.commitDwell > 0 {
+		frac = float64(m.dwellElapsed) / float64(m.commitDwell)
+	}
+	if frac > 1 {
+		frac = 1
+	}
+	if frac < 0 {
+		frac = 0
+	}
+	filled := int(float64(width) * frac)
+	if filled > width {
+		filled = width
+	}
+	style := styleNew
+	if !m.playing {
+		style = styleDim
+	}
+	return style.Render(strings.Repeat("━", filled)) +
+		styleDim.Render(strings.Repeat("─", width-filled))
+}
+
+// renderTimelineBar draws a time-based strip: each cell covers a slice
+// of wall-clock time, density (commit count) is encoded as character
+// shade, branch tag is encoded as color. Long quiet stretches in
+// history render as gaps; busy days as solid blocks.
 func (m programModel) renderTimelineBar(width int) string {
 	if width < 10 || len(m.history.Commits) == 0 {
 		return ""
 	}
-	segs := replay.Segments(m.history.Commits)
-	total := len(m.history.Commits)
+	cells := replay.TimelineBins(m.history.Commits, width)
 	var sb strings.Builder
-	used := 0
-	for i, s := range segs {
-		w := s.Len() * width / total
-		if i == len(segs)-1 {
-			w = width - used
+	for _, c := range cells {
+		ch := densityChar(c.Density)
+		if c.Count == 0 {
+			sb.WriteString(styleDim.Render(ch))
+			continue
 		}
-		if w < 1 {
-			w = 1
-		}
-		used += w
-		ch := "█"
-		switch s.Tag {
+		switch c.Tag {
 		case model.BranchTagFeature:
-			sb.WriteString(styleFeat.Render(strings.Repeat(ch, w)))
+			sb.WriteString(styleFeat.Render(ch))
 		case model.BranchTagAgainst:
-			sb.WriteString(styleAgst.Render(strings.Repeat(ch, w)))
+			sb.WriteString(styleAgst.Render(ch))
 		default:
-			sb.WriteString(styleDim.Render(strings.Repeat(ch, w)))
+			sb.WriteString(styleDim.Render(ch))
 		}
 	}
-	// caret position
-	caret := m.idx * width / total
+	// caret position — by commit time, not commit index, so it tracks
+	// the same time axis as the cells.
+	frac := replay.TimelineFrac(m.history.Commits, m.idx)
+	caret := int(frac * float64(width-1))
+	if caret < 0 {
+		caret = 0
+	}
 	if caret >= width {
 		caret = width - 1
 	}
 	return sb.String() + "\n" + strings.Repeat(" ", caret) + styleTitle.Render("▲")
+}
+
+// densityChar returns a unicode block element whose darkness reflects
+// commit density in a cell. Empty cells render as a thin baseline so
+// the strip retains a visible axis through quiet periods.
+func densityChar(density float64) string {
+	switch {
+	case density <= 0:
+		return "·"
+	case density < 0.25:
+		return "░"
+	case density < 0.5:
+		return "▒"
+	case density < 0.85:
+		return "▓"
+	default:
+		return "█"
+	}
 }
 
 func tagLabel(t model.BranchTag) string {

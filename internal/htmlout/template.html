@@ -60,11 +60,26 @@
     position: sticky; bottom: 0; background: var(--bg);
     border-top: 1px solid #21262d; padding: 8px 16px;
   }
+  .commit-progress {
+    height: 3px; background: #21262d; border-radius: 2px;
+    margin-bottom: 6px; overflow: hidden;
+  }
+  .commit-progress span {
+    display: block; height: 100%; background: var(--new);
+    box-shadow: 0 0 6px var(--new);
+    transition: width 80ms linear;
+  }
+  .commit-progress.paused span { background: var(--dim); box-shadow: none; }
   .timeline-wrap { position: relative; height: 18px; }
-  .timeline { display: flex; height: 12px; border-radius: 2px; overflow: hidden; position: absolute; left: 0; right: 0; top: 0; }
-  .timeline span.seg { display: block; height: 100%; }
+  .timeline {
+    display: flex; height: 12px; border-radius: 2px; overflow: hidden;
+    position: absolute; left: 0; right: 0; top: 0;
+    background: #181d24; /* baseline so quiet stretches still read as a strip */
+  }
+  .timeline span.seg { display: block; height: 100%; flex-shrink: 0; }
   .timeline span.seg.feat { background: var(--feat); }
   .timeline span.seg.against { background: var(--against); }
+  .timeline span.seg.empty { background: transparent; }
   .timeline-caret {
     position: absolute; top: 0; width: 2px; height: 18px;
     background: var(--new); transition: left 80ms linear;
@@ -104,6 +119,7 @@
   </section>
 </main>
 <footer>
+  <div class="commit-progress" id="commit-progress"><span style="width:0%"></span></div>
   <div class="timeline-wrap">
     <div class="timeline" id="timeline"></div>
     <div class="timeline-caret" id="caret"></div>
@@ -355,27 +371,95 @@ function runGitfilm(data) {
     walk(root, 0);
   }
 
+  // Time bounds for time-based timeline placement. Computed once from
+  // summaries; degenerate histories (single instant) fall back to even
+  // spacing via the timelineFrac() guards below.
+  const tBounds = (function () {
+    let lo = Infinity, hi = -Infinity;
+    for (const s of summaries) {
+      const u = s.when_unix || 0;
+      if (u < lo) lo = u;
+      if (u > hi) hi = u;
+    }
+    if (!isFinite(lo) || !isFinite(hi)) { lo = 0; hi = 0; }
+    return { lo, hi };
+  })();
+
+  function timelineFrac(i) {
+    if (commitCount <= 1) return 0;
+    if (tBounds.hi <= tBounds.lo) return i / (commitCount - 1);
+    const u = (summaries[i] && summaries[i].when_unix) || tBounds.lo;
+    return (u - tBounds.lo) / (tBounds.hi - tBounds.lo);
+  }
+
+  // renderTimeline draws a strip whose horizontal axis is wall-clock
+  // time. Each cell covers a fixed time slice, density (commit count)
+  // is encoded as opacity, dominant branch tag as color. Empty cells
+  // (long quiet periods) read as gaps in the strip.
+  const TIMELINE_BINS = 200;
   function renderTimeline() {
     const tl = document.getElementById('timeline');
     clear(tl);
+    document.getElementById('scrubber').max = String(Math.max(0, commitCount - 1));
     if (!commitCount) return;
-    let runStart = 0;
-    // Iterates summaries (cheap), never forces detail loads.
-    for (let i = 1; i <= commitCount; i++) {
-      if (i === commitCount || summaries[i].tag !== summaries[i - 1].tag) {
-        const tag = summaries[i - 1].tag;
-        const w = ((i - runStart) / commitCount) * 100;
-        tl.appendChild(el('span', { class: 'seg ' + tag, style: 'width:' + w + '%' }));
-        runStart = i;
+
+    const W = TIMELINE_BINS;
+    const cells = new Array(W);
+    for (let i = 0; i < W; i++) cells[i] = { count: 0, feat: 0, against: 0, other: 0 };
+
+    const span = tBounds.hi - tBounds.lo;
+    for (let i = 0; i < commitCount; i++) {
+      const s = summaries[i] || {};
+      let bin;
+      if (span <= 0) {
+        bin = W - 1;
+      } else {
+        bin = Math.floor(((s.when_unix || tBounds.lo) - tBounds.lo) * W / span);
+        if (bin >= W) bin = W - 1;
+        if (bin < 0) bin = 0;
       }
+      cells[bin].count++;
+      if (s.tag === 'feat') cells[bin].feat++;
+      else if (s.tag === 'against') cells[bin].against++;
+      else cells[bin].other++;
     }
-    document.getElementById('scrubber').max = String(commitCount - 1);
+
+    let maxCount = 0;
+    for (const c of cells) if (c.count > maxCount) maxCount = c.count;
+
+    const cellW = (100 / W).toFixed(4) + '%';
+    for (const c of cells) {
+      let cls = 'seg empty';
+      let style = 'width:' + cellW + ';';
+      if (c.count > 0) {
+        const tag = (c.feat >= c.against && c.feat >= c.other) ? 'feat'
+          : (c.against >= c.other) ? 'against' : 'empty';
+        cls = 'seg ' + tag;
+        const density = maxCount > 0 ? c.count / maxCount : 0;
+        // Floor opacity at 0.25 so a single-commit cell still reads,
+        // but max density gets the tag color at full saturation.
+        const opacity = 0.25 + 0.75 * density;
+        style += 'opacity:' + opacity.toFixed(3) + ';';
+      }
+      tl.appendChild(el('span', { class: cls, style }));
+    }
   }
 
   function updateCaret() {
     if (!commitCount) return;
-    const pct = (idx / Math.max(1, commitCount - 1)) * 100;
+    const pct = timelineFrac(idx) * 100;
     document.getElementById('caret').style.left = 'calc(' + pct + '% - 1px)';
+  }
+
+  function updateCommitProgress() {
+    const wrap = document.getElementById('commit-progress');
+    if (!wrap) return;
+    const bar = wrap.firstElementChild;
+    if (!bar) return;
+    const pct = Math.max(0, Math.min(100, progress * 100));
+    bar.style.width = pct.toFixed(2) + '%';
+    if (playing) wrap.classList.remove('paused');
+    else wrap.classList.add('paused');
   }
 
   // Per-file and per-commit budgets are precomputed in Go (under
@@ -592,6 +676,9 @@ function runGitfilm(data) {
     last = t;
     step(dt);
     render();
+    // Progress bar advances continuously within a commit, independent
+    // of the idx/anim signature gating in render(). Cheap DOM op.
+    updateCommitProgress();
     requestAnimationFrame(loop);
   }
 
