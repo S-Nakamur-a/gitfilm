@@ -240,6 +240,71 @@ func (t *TreeState) HeatSnapshot() HeatSnapshot {
 	return hs
 }
 
+// HeatSnapshotWith is HeatSnapshot but skips paths whose heat ratio
+// (heat / current max heat) falls below opts.HiddenBelow. This matches
+// the visibility rule the HTML player applies on the browser side, so
+// the precomputed JSON does not carry rows that would be hidden anyway.
+//
+// Why this matters for big repos: the unfiltered snapshot retains every
+// path ever touched (Step decays heat but never deletes the entry), so
+// per-frame size grows with cumulative-unique-files. On a multi-year
+// monorepo with `--max 0` that pushed the HTML payload to tens of GB,
+// because each of N commits carries the full path×heat map of every
+// file. Filtering at source bounds each frame to recently-active files.
+//
+// FaintBelow is intentionally ignored — faint files are still visible
+// in the player and must be retained.
+func (t *TreeState) HeatSnapshotWith(opts SnapshotOpts) HeatSnapshot {
+	if opts.HiddenBelow <= 0 {
+		return t.HeatSnapshot()
+	}
+	max := 0.0
+	for _, v := range t.heat {
+		if v > max {
+			max = v
+		}
+	}
+	if max <= 0 {
+		max = 1
+	}
+	threshold := opts.HiddenBelow * max
+
+	hs := HeatSnapshot{
+		Heat:    make(map[string]float64),
+		Touches: make(map[string]int),
+		Ghosts:  make(map[string]bool),
+		Added:   make(map[string]bool, len(t.added)),
+	}
+	for k, v := range t.heat {
+		if v < threshold {
+			continue
+		}
+		hs.Heat[k] = v
+		hs.Touches[k] = t.touches[k]
+	}
+	// Mirror the player's ghost branch: it only fires for paths absent
+	// from the heat map. Step never removes from heat, so unfiltered
+	// runs effectively never use that branch — a ghost whose heat is
+	// below threshold gets dropped via the ratio check instead. We must
+	// drop those ghosts too, otherwise filtering would resurrect them as
+	// permanent 👻 rows.
+	for k, v := range t.deleted {
+		if !v {
+			continue
+		}
+		if h, ok := t.heat[k]; ok && h < threshold {
+			continue
+		}
+		hs.Ghosts[k] = true
+	}
+	for k, v := range t.added {
+		if v {
+			hs.Added[k] = true
+		}
+	}
+	return hs
+}
+
 // pruneEmptyDirs removes directory nodes whose entire subtree is
 // empty (i.e. all leaves were filtered out by visibility thresholds).
 // Returns true if the node passed in is itself prunable.

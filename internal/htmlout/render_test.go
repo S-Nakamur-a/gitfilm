@@ -44,6 +44,7 @@ func TestRender_ContainsExpectedMarkers(t *testing.T) {
 	for _, want := range []string{
 		"<title>gitfilm — feat/x</title>",
 		`id="data"`,
+		`id="chunk-0"`,
 		`"branch":"feat/x"`,
 		`"against":"main"`,
 		`"hash":"abc1234567"`,
@@ -60,26 +61,37 @@ func TestRender_ContainsExpectedMarkers(t *testing.T) {
 	}
 }
 
-func TestRender_JSONScriptParses(t *testing.T) {
+func TestRender_MetaAndChunkParse(t *testing.T) {
 	var buf bytes.Buffer
 	if err := Render(&buf, sampleHistory()); err != nil {
 		t.Fatal(err)
 	}
-	// extract the JSON between the script tags
-	re := regexp.MustCompile(`(?s)<script id="data" type="application/json">(.*?)</script>`)
-	m := re.FindStringSubmatch(buf.String())
-	if len(m) != 2 {
+	out := buf.String()
+	// meta
+	metaRe := regexp.MustCompile(`(?s)<script id="data" type="application/json">(.*?)</script>`)
+	mm := metaRe.FindStringSubmatch(out)
+	if len(mm) != 2 {
 		t.Fatalf("could not locate data script tag")
 	}
-	var p payload
-	if err := json.Unmarshal([]byte(m[1]), &p); err != nil {
-		t.Fatalf("data is not valid JSON: %v", err)
+	var meta metaJSON
+	if err := json.Unmarshal([]byte(mm[1]), &meta); err != nil {
+		t.Fatalf("meta is not valid JSON: %v", err)
 	}
-	if p.Branch != "feat/x" || len(p.Commits) != 1 {
-		t.Errorf("payload mismatch: %+v", p)
+	if meta.Branch != "feat/x" || meta.CommitCount != 1 || len(meta.Summaries) != 1 {
+		t.Errorf("meta mismatch: %+v", meta)
 	}
-	if len(p.Commits[0].Files) != 1 || len(p.Commits[0].Files[0].Hunks) != 1 {
-		t.Errorf("files/hunks not preserved: %+v", p.Commits)
+	// detail chunk
+	chunkRe := regexp.MustCompile(`(?s)<script id="chunk-0" type="application/json">(.*?)</script>`)
+	cm := chunkRe.FindStringSubmatch(out)
+	if len(cm) != 2 {
+		t.Fatalf("could not locate chunk-0 script tag")
+	}
+	var chunk []commitDetail
+	if err := json.Unmarshal([]byte(cm[1]), &chunk); err != nil {
+		t.Fatalf("chunk is not valid JSON: %v", err)
+	}
+	if len(chunk) != 1 || len(chunk[0].Files) != 1 || len(chunk[0].Files[0].Hunks) != 1 {
+		t.Errorf("chunk detail mismatch: %+v", chunk)
 	}
 }
 

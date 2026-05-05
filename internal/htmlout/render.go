@@ -14,6 +14,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/S-Nakamur-a/gitfilm/internal/model"
 	"github.com/S-Nakamur-a/gitfilm/internal/output"
@@ -26,42 +27,196 @@ var templateHTML string
 // DefaultOutputPath is used when output.Config.HTMLOutPath is empty.
 const DefaultOutputPath = "gitfilm.html"
 
+// maxHunksHTML matches replay.FirstHunkProfile.MaxHunks: the HTML
+// player only animates the first hunk per file. Defining it here as a
+// constant lets us slice without a circular reference back to replay's
+// VisibilityProfile fields.
+const maxHunksHTML = 1
+
+// detailChunkSize is how many commits' detail (files/snapshot/body)
+// share a single <script id="chunk-N"> tag. The browser parses one
+// chunk on demand when its commit becomes the current frame, so the
+// initial <script id="data"> JSON.parse only sees a small "summaries"
+// array (a few MB) regardless of total history length. 100 keeps each
+// chunk's JSON.parse below ~50ms on a 7.9k-commit monorepo while
+// avoiding excessive script-tag overhead.
+const detailChunkSize = 100
+
+// chunkMarker splits template.html so we can stream chunk <script>
+// tags between the head and the player JS without buffering them all
+// in memory before template.Execute. Treated as a literal string.
+const chunkMarker = "<!--GITFILM_CHUNKS-->"
+
 // Render writes a single self-contained HTML file representing the
 // history. The page embeds all commit data, precomputed playback
 // budgets and per-frame heat snapshots as JSON, so the file works
 // fully offline and the browser only handles cursor advancement and
 // DOM updates.
 func Render(w io.Writer, h model.History) error {
-	payload := buildPayload(h)
-	tmpl, err := template.New("gitfilm").Parse(templateHTML)
+	return RenderWithDiag(w, h, nil)
+}
+
+// RenderWithDiag is Render plus per-stage timing reports written to
+// diag (when non-nil). Used by the CLI to expose where the wall time
+// goes when generating the HTML — payload build vs JSON encode vs
+// template execute. Keeping it as a separate entry point so existing
+// callers / tests don't need to plumb a writer.
+//
+// Output structure:
+//
+//	<head>...</head>
+//	<body>
+//	  ... ui ...
+//	  <script id="data">{...meta + summaries...}</script>
+//	  <script id="chunk-0">[...detail for commits 0..99...]</script>
+//	  <script id="chunk-1">[...detail for commits 100..199...]</script>
+//	  ...
+//	  <script>player JS</script>
+//	</body>
+//
+// The browser parses only the small "data" script up front. Each
+// chunk's textContent is JSON.parse'd lazily when the user scrubs into
+// it. This keeps initial paint quick and bounded regardless of how
+// many commits the history contains.
+func RenderWithDiag(w io.Writer, h model.History, diag io.Writer) error {
+	tBuild := time.Now()
+	meta, chunks, payloadStats := buildPayloadTimed(h, diag)
+	dBuild := time.Since(tBuild)
+
+	head, tail, ok := strings.Cut(templateHTML, chunkMarker)
+	if !ok {
+		return fmt.Errorf("htmlout: template missing %q marker", chunkMarker)
+	}
+
+	tParse := time.Now()
+	headTmpl, err := template.New("gitfilm-head").Parse(head)
 	if err != nil {
 		return err
 	}
-	// JSON inside a <script> tag must avoid `</script>` and use safe
-	// characters. encoding/json handles `<`/`>`/`&` via SetEscapeHTML.
-	var jsonBuf bytes.Buffer
-	enc := json.NewEncoder(&jsonBuf)
+	dParse := time.Since(tParse)
+
+	// Encode meta (small) into a buffer so we can pass it through
+	// html/template as template.JS. Meta is summary-only so this stays
+	// in the few-MB range even for huge histories.
+	tMeta := time.Now()
+	var metaBuf bytes.Buffer
+	enc := json.NewEncoder(&metaBuf)
 	enc.SetEscapeHTML(true)
-	if err := enc.Encode(payload); err != nil {
+	if err := enc.Encode(meta); err != nil {
 		return err
 	}
-	jsonStr := strings.TrimRight(jsonBuf.String(), "\n")
-	return tmpl.Execute(w, struct {
+	metaStr := strings.TrimRight(metaBuf.String(), "\n")
+	dMeta := time.Since(tMeta)
+
+	tExec := time.Now()
+	if err := headTmpl.Execute(w, struct {
 		Branch  string
 		Against string
 		Data    template.JS
 	}{
 		Branch:  h.Branch,
 		Against: h.Against,
-		Data:    template.JS(jsonStr),
-	})
+		Data:    template.JS(metaStr),
+	}); err != nil {
+		return err
+	}
+	dExec := time.Since(tExec)
+
+	// Stream detail chunks directly to the writer — no Buffer, so peak
+	// memory stays bounded by chunk size, not total payload.
+	tChunks := time.Now()
+	var chunkBytes int
+	cw := &countingWriter{w: w}
+	for i, ch := range chunks {
+		if _, err := fmt.Fprintf(cw, "\n<script id=\"chunk-%d\" type=\"application/json\">", i); err != nil {
+			return err
+		}
+		ce := json.NewEncoder(cw)
+		ce.SetEscapeHTML(true)
+		if err := ce.Encode(ch); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(cw, "</script>"); err != nil {
+			return err
+		}
+	}
+	chunkBytes = cw.n
+	dChunks := time.Since(tChunks)
+
+	tTail := time.Now()
+	if _, err := io.WriteString(w, tail); err != nil {
+		return err
+	}
+	dTail := time.Since(tTail)
+
+	if diag != nil {
+		fmt.Fprintf(diag,
+			"htmlout timings: build=%s (heat=%s, snapshot=%s, files=%s) parse=%s meta=%s exec=%s chunks=%s tail=%s meta_json=%.1f MB chunk_json=%.1f MB commits=%d chunks=%d\n",
+			dBuild.Round(time.Millisecond),
+			payloadStats.heat.Round(time.Millisecond),
+			payloadStats.snapshot.Round(time.Millisecond),
+			payloadStats.files.Round(time.Millisecond),
+			dParse.Round(time.Millisecond),
+			dMeta.Round(time.Millisecond),
+			dExec.Round(time.Millisecond),
+			dChunks.Round(time.Millisecond),
+			dTail.Round(time.Millisecond),
+			float64(metaBuf.Len())/1024/1024,
+			float64(chunkBytes)/1024/1024,
+			len(h.Commits),
+			len(chunks),
+		)
+	}
+	return nil
 }
 
-type payload struct {
-	Branch  string       `json:"branch"`
-	Against string       `json:"against"`
-	Tuning  tuningJSON   `json:"tuning"`
-	Commits []commitJSON `json:"commits"`
+// countingWriter tallies bytes written so the diag line can show the
+// streamed chunk total without holding it in memory.
+type countingWriter struct {
+	w io.Writer
+	n int
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += n
+	return n, err
+}
+
+// metaJSON is the eager-parsed payload. It carries everything the
+// browser needs for timeline rendering, dwell scheduling and basic
+// commit metadata, but nothing per-frame heavy (no diff text, no
+// snapshots, no commit body). Heavy fields live in chunked detail
+// scripts and are JSON.parse'd on demand.
+type metaJSON struct {
+	Branch      string          `json:"branch"`
+	Against     string          `json:"against"`
+	Tuning      tuningJSON      `json:"tuning"`
+	CommitCount int             `json:"commit_count"`
+	ChunkSize   int             `json:"chunk_size"`
+	Summaries   []commitSummary `json:"summaries"`
+}
+
+// commitSummary is the lightweight per-commit record present in meta.
+// Roughly ~150–250 bytes JSON-encoded, so 7.9k commits ≈ 1–2 MB.
+type commitSummary struct {
+	Hash       string `json:"hash"`
+	Short      string `json:"short"`
+	AuthorName string `json:"author_name"`
+	When       string `json:"when"`
+	WhenUnix   int64  `json:"when_unix"`
+	Subject    string `json:"subject"`
+	Tag        string `json:"tag"`
+	DwellMS    int64  `json:"dwell_ms"`
+	MaxBudget  int    `json:"max_budget"`
+}
+
+// commitDetail is the heavyweight per-commit record. Lives inside a
+// chunk script tag and is JSON.parse'd lazily by the player.
+type commitDetail struct {
+	Body     string       `json:"body,omitempty"`
+	Files    []fileJSON   `json:"files"`
+	Snapshot snapshotJSON `json:"snapshot"`
 }
 
 // tuningJSON exposes the policy constants from internal/replay so the
@@ -78,24 +233,8 @@ type tuningJSON struct {
 	FaintBelow    float64 `json:"faint_below"`
 }
 
-type commitJSON struct {
-	Hash       string         `json:"hash"`
-	Short      string         `json:"short"`
-	AuthorName string         `json:"author_name"`
-	When       string         `json:"when"`
-	WhenUnix   int64          `json:"when_unix"`
-	Subject    string         `json:"subject"`
-	Body       string         `json:"body,omitempty"`
-	Tag        string         `json:"tag"`
-	Files      []fileJSON     `json:"files"`
-	DwellMS    int64          `json:"dwell_ms"`
-	MaxBudget  int            `json:"max_budget"`
-	Snapshot   snapshotJSON   `json:"snapshot"`
-}
-
 type fileJSON struct {
 	Path    string     `json:"path"`
-	OldPath string     `json:"old_path,omitempty"`
 	Status  string     `json:"status"`
 	Added   int        `json:"added"`
 	Removed int        `json:"removed"`
@@ -103,13 +242,13 @@ type fileJSON struct {
 	Hunks   []hunkJSON `json:"hunks"`
 }
 
+// hunkJSON is intentionally minimal: the HTML player only renders
+// f.hunks[0].lines[:VISIBLE_LINES], so the old/new line-number metadata
+// and the hunk header are never read on the browser side. Dropping
+// them shrinks the per-commit payload — at ~130k hunks in a 7.9k-commit
+// monorepo, even a few bytes per hunk multiplies into MB.
 type hunkJSON struct {
-	OldStart int        `json:"old_start"`
-	OldLines int        `json:"old_lines"`
-	NewStart int        `json:"new_start"`
-	NewLines int        `json:"new_lines"`
-	Header   string     `json:"header"`
-	Lines    []lineJSON `json:"lines"`
+	Lines []lineJSON `json:"lines"`
 }
 
 // Compact line representation: k = "+" / "-" / " ", t = text.
@@ -129,9 +268,27 @@ type snapshotJSON struct {
 	Added   []string  `json:"added"`
 }
 
-func buildPayload(h model.History) payload {
+// payloadStats accumulates per-stage durations inside buildPayload so
+// callers (RenderWithDiag) can report where the time went.
+type payloadStats struct {
+	heat     time.Duration // state.Step
+	snapshot time.Duration // HeatSnapshot + buildSnapshot (sort, copy)
+	files    time.Duration // file/hunk/line copy + budget calc
+}
+
+// buildPayloadTimed walks the history once, accumulating
+//   - meta.Summaries: lightweight per-commit fields parsed eagerly by
+//     the browser (hash/subject/dwell/tag/etc.)
+//   - chunks: groups of detailChunkSize commitDetail records (body,
+//     files, snapshot) parsed lazily on demand.
+//
+// The split keeps the eager parse bounded by O(commits) summary bytes
+// instead of O(commits) × diff-text bytes. Every commit still gets one
+// state.Step + one HeatSnapshotWith call, so cost-of-build is the same
+// as the single-payload version.
+func buildPayloadTimed(h model.History, diag io.Writer) (metaJSON, [][]commitDetail, payloadStats) {
 	opts := replay.DefaultSnapshotOpts()
-	p := payload{
+	meta := metaJSON{
 		Branch:  h.Branch,
 		Against: h.Against,
 		Tuning: tuningJSON{
@@ -143,52 +300,99 @@ func buildPayload(h model.History) payload {
 			HiddenBelow:   opts.HiddenBelow,
 			FaintBelow:    opts.FaintBelow,
 		},
-		Commits: make([]commitJSON, 0, len(h.Commits)),
+		CommitCount: len(h.Commits),
+		ChunkSize:   detailChunkSize,
+		Summaries:   make([]commitSummary, 0, len(h.Commits)),
 	}
 
+	chunks := make([][]commitDetail, 0, (len(h.Commits)+detailChunkSize-1)/detailChunkSize)
+	var curChunk []commitDetail
+
+	var stats payloadStats
 	state := replay.NewTreeState(replay.DefaultHalfLife)
-	for _, c := range h.Commits {
+	progressEvery := len(h.Commits) / 20
+	if progressEvery < 100 {
+		progressEvery = 100
+	}
+	tProgress := time.Now()
+	for i, c := range h.Commits {
+		ts := time.Now()
 		state.Step(c)
-		cj := commitJSON{
+		stats.heat += time.Since(ts)
+
+		ts = time.Now()
+		snap := buildSnapshot(state.HeatSnapshotWith(opts))
+		stats.snapshot += time.Since(ts)
+
+		if diag != nil && (i+1)%progressEvery == 0 {
+			fmt.Fprintf(diag,
+				"[gitfilm] payload: %d/%d commits (heat=%s snapshot=%s files=%s last-batch=%s heat-entries=%d chunks=%d)\n",
+				i+1, len(h.Commits),
+				stats.heat.Round(time.Millisecond),
+				stats.snapshot.Round(time.Millisecond),
+				stats.files.Round(time.Millisecond),
+				time.Since(tProgress).Round(time.Millisecond),
+				len(snap.Paths),
+				len(chunks),
+			)
+			tProgress = time.Now()
+		}
+
+		ts = time.Now()
+		meta.Summaries = append(meta.Summaries, commitSummary{
 			Hash:       c.Hash,
 			Short:      c.ShortHash,
 			AuthorName: c.AuthorName,
 			When:       c.When.Format("2006-01-02 15:04"),
 			WhenUnix:   c.When.Unix(),
 			Subject:    c.Subject,
-			Body:       c.Body,
 			Tag:        tagJSON(c.Tag),
 			MaxBudget:  replay.CommitMaxBudgetWith(c, replay.FirstHunkProfile),
 			DwellMS:    replay.DwellForWith(c, replay.FirstHunkProfile).Milliseconds(),
-			Snapshot:   buildSnapshot(state.HeatSnapshot()),
+		})
+		det := commitDetail{
+			Body:     c.Body,
+			Snapshot: snap,
 		}
 		for _, f := range c.Files {
 			fj := fileJSON{
 				Path:    f.Path,
-				OldPath: f.OldPath,
 				Status:  f.Status.String(),
 				Added:   f.Added,
 				Removed: f.Removed,
 				Budget:  replay.FileBudgetWith(f, replay.FirstHunkProfile),
 			}
-			for _, hk := range f.Hunks {
-				hj := hunkJSON{
-					OldStart: hk.OldStart,
-					OldLines: hk.OldLines,
-					NewStart: hk.NewStart,
-					NewLines: hk.NewLines,
-					Header:   hk.Header,
+			// Ship only what the player will render. The HTML profile
+			// shows hunks[0].lines[:VisibleLinesPerHunkHTML]; everything
+			// else is bytes the browser will load and ignore.
+			hunks := f.Hunks
+			if len(hunks) > maxHunksHTML {
+				hunks = hunks[:maxHunksHTML]
+			}
+			for _, hk := range hunks {
+				lines := hk.Lines
+				if len(lines) > replay.VisibleLinesPerHunkHTML {
+					lines = lines[:replay.VisibleLinesPerHunkHTML]
 				}
-				for _, l := range hk.Lines {
+				hj := hunkJSON{Lines: make([]lineJSON, 0, len(lines))}
+				for _, l := range lines {
 					hj.Lines = append(hj.Lines, lineJSON{K: lineKind(l.Kind), T: l.Text})
 				}
 				fj.Hunks = append(fj.Hunks, hj)
 			}
-			cj.Files = append(cj.Files, fj)
+			det.Files = append(det.Files, fj)
 		}
-		p.Commits = append(p.Commits, cj)
+		curChunk = append(curChunk, det)
+		if len(curChunk) >= detailChunkSize {
+			chunks = append(chunks, curChunk)
+			curChunk = nil
+		}
+		stats.files += time.Since(ts)
 	}
-	return p
+	if len(curChunk) > 0 {
+		chunks = append(chunks, curChunk)
+	}
+	return meta, chunks, stats
 }
 
 // buildSnapshot encodes a HeatSnapshot as parallel arrays. Paths /
@@ -255,11 +459,18 @@ func (renderer) Run(h model.History, cfg output.Config, diag io.Writer) error {
 		return err
 	}
 	defer f.Close()
-	if err := Render(f, h); err != nil {
+	t0 := time.Now()
+	if err := RenderWithDiag(f, h, diag); err != nil {
 		return err
 	}
 	if diag != nil {
-		fmt.Fprintf(diag, "wrote %s (%d frames)\n", path, len(h.Commits))
+		st, _ := f.Stat()
+		var sizeMB float64
+		if st != nil {
+			sizeMB = float64(st.Size()) / 1024 / 1024
+		}
+		fmt.Fprintf(diag, "wrote %s (%d frames, %.1f MB) total=%s\n",
+			path, len(h.Commits), sizeMB, time.Since(t0).Round(time.Millisecond))
 	}
 	return nil
 }

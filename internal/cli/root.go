@@ -25,6 +25,7 @@ type options struct {
 	htmlOut string
 	maxN    int
 	stats   bool
+	verbose bool
 }
 
 func New() *cobra.Command {
@@ -47,6 +48,7 @@ func New() *cobra.Command {
 	cmd.Flags().StringVar(&opts.htmlOut, "html-out", "gitfilm.html", "html output file path (when -o html)")
 	cmd.Flags().IntVar(&opts.maxN, "max", 500, "limit to the most recent N commits (0 = no limit, careful on big repos)")
 	cmd.Flags().BoolVar(&opts.stats, "stats", false, "print load time, dwell distribution, and per-commit stats; do not render")
+	cmd.Flags().BoolVarP(&opts.verbose, "verbose", "v", false, "log per-stage timings and memory to stderr (always on for non-tui modes)")
 	return cmd
 }
 
@@ -56,6 +58,12 @@ func run(branch string, opts options) error {
 		return fmt.Errorf("resolve repo path: %w", err)
 	}
 	loader := gitlog.NewLoader(repo)
+	verbose := opts.verbose || opts.mode != "tui"
+	if verbose {
+		loader.SetDiag(os.Stderr)
+		fmt.Fprintf(os.Stderr, "[gitfilm] starting: branch=%s against=%s mode=%s max=%d subdir=%q\n",
+			branch, opts.against, opts.mode, opts.maxN, opts.subdir)
+	}
 
 	loadStart := time.Now()
 	frames, err := loader.Load(gitlog.LoadRequest{
@@ -71,6 +79,24 @@ func run(branch string, opts options) error {
 	if len(frames.Commits) == 0 {
 		return errors.New("no commits found for the given branch")
 	}
+	if verbose {
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+		var files, hunks, lines int
+		for _, c := range frames.Commits {
+			files += len(c.Files)
+			for _, f := range c.Files {
+				hunks += len(f.Hunks)
+				for _, h := range f.Hunks {
+					lines += len(h.Lines)
+				}
+			}
+		}
+		fmt.Fprintf(os.Stderr,
+			"[gitfilm] loaded: %s — %d commits, %d files, %d hunks, %d diff-lines, alloc=%.1f MB\n",
+			loadDur.Round(time.Millisecond), len(frames.Commits), files, hunks, lines,
+			float64(mem.Alloc)/1024/1024)
+	}
 
 	if opts.stats {
 		printStats(os.Stderr, frames, loadDur)
@@ -82,7 +108,19 @@ func run(branch string, opts options) error {
 		return fmt.Errorf("unknown output mode %q (want one of: %s)", opts.mode, strings.Join(output.Names(), ", "))
 	}
 	cfg := output.Config{HTMLOutPath: opts.htmlOut}
-	return r.Run(frames, cfg, os.Stderr)
+	renderStart := time.Now()
+	if err := r.Run(frames, cfg, os.Stderr); err != nil {
+		return err
+	}
+	if verbose {
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+		fmt.Fprintf(os.Stderr,
+			"[gitfilm] render done: %s (alloc=%.1f MB sys=%.1f MB)\n",
+			time.Since(renderStart).Round(time.Millisecond),
+			float64(mem.Alloc)/1024/1024, float64(mem.Sys)/1024/1024)
+	}
+	return nil
 }
 
 // printStats verifies the perf wins from the recent tuning by

@@ -83,6 +83,11 @@
 </style>
 </head>
 <body>
+<div id="loading" style="position:fixed;inset:0;background:#0d1117;color:#c9d1d9;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;z-index:9999;font:14px/1.4 system-ui;">
+  <div style="font-size:18px;">gitfilm</div>
+  <div id="loading-status">Loading commit data…</div>
+  <div id="loading-hint" style="font-size:11px;color:#8b949e;">commit details load progressively as you scrub</div>
+</div>
 <header>
   <h1>gitfilm</h1>
   <span class="meta"><strong id="branch"></strong> ⇒ <span id="against"></span></span>
@@ -113,12 +118,97 @@
 </footer>
 
 <script id="data" type="application/json">{{.Data}}</script>
+<!--GITFILM_CHUNKS-->
 <script>
-(function () {
-  const data = JSON.parse(document.getElementById('data').textContent);
-  const commits = data.commits || [];
+// Two-phase boot: paint the loading overlay first, then yield to the
+// renderer so the browser can show it before we synchronously block on
+// JSON.parse (which can take seconds on >100MB payloads). Without the
+// double-rAF the parse starts on the same frame and the user sees a
+// frozen white page.
+function bootGitfilm() {
+  const status = document.getElementById('loading-status');
+  function setStatus(msg) {
+    if (status) status.textContent = msg;
+  }
+
+  setStatus('Reading payload…');
+  const raw = document.getElementById('data').textContent;
+  setStatus('Parsing ' + (raw.length / 1024 / 1024).toFixed(1) + ' MB JSON…');
+
+  // setTimeout 0 lets the status repaint before JSON.parse blocks.
+  setTimeout(function () {
+    const tParse = performance.now();
+    const data = JSON.parse(raw);
+    const dt = performance.now() - tParse;
+    setStatus('Parsed in ' + dt.toFixed(0) + 'ms — initializing…');
+    // Free the source string so the browser can GC the original ~Nx MB.
+    document.getElementById('data').textContent = '';
+    setTimeout(function () { runGitfilm(data); }, 0);
+  }, 0);
+}
+
+function runGitfilm(data) {
+  // The eager payload only carries lightweight per-commit summaries.
+  // Heavy fields (files / snapshot / body) live in <script id="chunk-N">
+  // tags and are JSON.parse'd on demand by detailAt(i). This keeps the
+  // initial parse bounded by O(commits) summary bytes rather than
+  // O(commits) × diff-text bytes.
+  const summaries = data.summaries || [];
+  const commitCount = data.commit_count || summaries.length;
+  const chunkSize = data.chunk_size || 100;
   document.getElementById('branch').textContent = data.branch || '';
   document.getElementById('against').textContent = data.against || '';
+
+  // detailCache holds parsed chunks keyed by chunk index. The Map's
+  // insertion-order iteration gives us a cheap LRU: refresh on hit by
+  // delete+re-set, evict the oldest when over the limit.
+  const detailCache = new Map();
+  const detailCacheLimit = 4; // ~400 commits worth of detail kept hot
+  function detailAt(i) {
+    if (i < 0 || i >= commitCount) return null;
+    const ci = Math.floor(i / chunkSize);
+    const cached = detailCache.get(ci);
+    if (cached) {
+      detailCache.delete(ci);
+      detailCache.set(ci, cached);
+      return cached[i - ci * chunkSize] || null;
+    }
+    const tag = document.getElementById('chunk-' + ci);
+    if (!tag) return null;
+    const text = tag.textContent;
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      console.error('failed to parse chunk', ci, err);
+      parsed = [];
+    }
+    // Drop the source string so the browser can GC the textContent.
+    tag.textContent = '';
+    detailCache.set(ci, parsed);
+    if (detailCache.size > detailCacheLimit) {
+      const oldest = detailCache.keys().next().value;
+      detailCache.delete(oldest);
+    }
+    return parsed[i - ci * chunkSize] || null;
+  }
+
+  // commitAt merges the eager summary with the lazily-loaded detail
+  // for full-commit access. Use this only when you actually need
+  // files/snapshot/body — for tag/dwell/subject the summary suffices.
+  const emptyDetail = { body: '', files: [], snapshot: { paths: [], heat: [], touches: [], ghosts: [], added: [] } };
+  function commitAt(i) {
+    const s = summaries[i] || {};
+    const d = detailAt(i) || emptyDetail;
+    return {
+      hash: s.hash, short: s.short, author_name: s.author_name,
+      when: s.when, when_unix: s.when_unix, subject: s.subject,
+      tag: s.tag, dwell_ms: s.dwell_ms, max_budget: s.max_budget,
+      body: d.body || '',
+      files: d.files || [],
+      snapshot: d.snapshot || emptyDetail.snapshot,
+    };
+  }
 
   // ---- DOM helpers (no innerHTML; builds elements via textContent) ----
   function el(tag, attrs, children) {
@@ -155,19 +245,35 @@
   const HIDDEN_BELOW = T.hidden_below || 0.005;
   const FAINT_BELOW = T.faint_below || 0.05;
 
-  // Per-frame heat snapshots are precomputed in Go (parallel arrays)
-  // and reconstituted into Maps/Sets here for fast lookup during
-  // rendering. The browser never reimplements heat decay.
-  const snapshots = commits.map((c) => {
-    const s = c.snapshot || { paths: [], heat: [], touches: [], ghosts: [], added: [] };
+  // Per-frame heat snapshots are reconstituted into Maps/Sets lazily.
+  // Source data lives in the per-commit detail (chunk-loaded), so this
+  // also implicitly forces the chunk to be parsed. A small LRU keeps
+  // recently-rendered frames hot during scrubs.
+  const snapshotCache = new Map();
+  const snapshotCacheLimit = 16;
+  function snapshotAt(i) {
+    const hit = snapshotCache.get(i);
+    if (hit !== undefined) {
+      snapshotCache.delete(i);
+      snapshotCache.set(i, hit);
+      return hit;
+    }
+    const d = detailAt(i) || emptyDetail;
+    const s = d.snapshot || emptyDetail.snapshot;
     const heat = new Map();
     const touches = new Map();
-    for (let i = 0; i < s.paths.length; i++) {
-      heat.set(s.paths[i], s.heat[i]);
-      touches.set(s.paths[i], s.touches[i]);
+    for (let j = 0; j < s.paths.length; j++) {
+      heat.set(s.paths[j], s.heat[j]);
+      touches.set(s.paths[j], s.touches[j]);
     }
-    return { heat, touches, ghosts: new Set(s.ghosts), added: new Set(s.added) };
-  });
+    const snap = { heat, touches, ghosts: new Set(s.ghosts), added: new Set(s.added) };
+    snapshotCache.set(i, snap);
+    if (snapshotCache.size > snapshotCacheLimit) {
+      const oldest = snapshotCache.keys().next().value;
+      snapshotCache.delete(oldest);
+    }
+    return snap;
+  }
 
   function heatColor(t) {
     if (t < 0.25) return 'var(--against)';
@@ -252,22 +358,23 @@
   function renderTimeline() {
     const tl = document.getElementById('timeline');
     clear(tl);
-    if (!commits.length) return;
+    if (!commitCount) return;
     let runStart = 0;
-    for (let i = 1; i <= commits.length; i++) {
-      if (i === commits.length || commits[i].tag !== commits[i - 1].tag) {
-        const tag = commits[i - 1].tag;
-        const w = ((i - runStart) / commits.length) * 100;
+    // Iterates summaries (cheap), never forces detail loads.
+    for (let i = 1; i <= commitCount; i++) {
+      if (i === commitCount || summaries[i].tag !== summaries[i - 1].tag) {
+        const tag = summaries[i - 1].tag;
+        const w = ((i - runStart) / commitCount) * 100;
         tl.appendChild(el('span', { class: 'seg ' + tag, style: 'width:' + w + '%' }));
         runStart = i;
       }
     }
-    document.getElementById('scrubber').max = String(commits.length - 1);
+    document.getElementById('scrubber').max = String(commitCount - 1);
   }
 
   function updateCaret() {
-    if (!commits.length) return;
-    const pct = (idx / Math.max(1, commits.length - 1)) * 100;
+    if (!commitCount) return;
+    const pct = (idx / Math.max(1, commitCount - 1)) * 100;
     document.getElementById('caret').style.left = 'calc(' + pct + '% - 1px)';
   }
 
@@ -438,12 +545,14 @@
   }
 
   function render() {
-    if (!commits.length) return;
-    const c = commits[idx];
+    if (!commitCount) return;
+    // commitAt forces the chunk for `idx` to be parsed if not yet
+    // cached. The cost is bounded by chunkSize (≤100 commits' detail).
+    const c = commitAt(idx);
     if (lastIdxRendered !== idx) {
-      document.getElementById('counter').textContent = (idx + 1) + '/' + commits.length;
+      document.getElementById('counter').textContent = (idx + 1) + '/' + commitCount;
       document.getElementById('scrubber').value = String(idx);
-      renderTree(snapshots[idx]);
+      renderTree(snapshotAt(idx));
       updateCaret();
       lastIdxRendered = idx;
       lastRightSig = '';
@@ -458,16 +567,18 @@
 
   function step(dt) {
     if (!playing) return;
-    const c = commits[idx];
+    // Pacing only needs the summary's dwell_ms — no need to force a
+    // chunk parse on every animation frame.
+    const s = summaries[idx] || {};
     // dwell_ms is precomputed in Go (replay.DwellForWith with the
     // first-hunk visibility profile). The browser just turns the wall
     // clock into progress within the commit.
-    const dwellSec = (c.dwell_ms || 0) / 1000;
+    const dwellSec = (s.dwell_ms || 0) / 1000;
     const dwell = dwellSec > 0 ? dwellSec : 1;
     progress += dt / dwell;
     if (progress >= 1) {
       progress = 0;
-      if (idx < commits.length - 1) idx++;
+      if (idx < commitCount - 1) idx++;
       else playing = false;
     }
   }
@@ -489,7 +600,7 @@
     if (idx > 0) { idx--; progress = 0; }
   });
   document.getElementById('next').addEventListener('click', () => {
-    if (idx < commits.length - 1) { idx++; progress = 0; }
+    if (idx < commitCount - 1) { idx++; progress = 0; }
   });
   document.getElementById('scrubber').addEventListener('input', (e) => {
     idx = parseInt(e.target.value, 10) || 0; progress = 0;
@@ -503,14 +614,14 @@
     if (e.key === 'ArrowRight') step = e.shiftKey ? 10 : 1;
     else if (e.key === 'ArrowLeft') step = e.shiftKey ? -10 : -1;
     else if (e.key === 'Home') { idx = 0; progress = 0; e.preventDefault(); return; }
-    else if (e.key === 'End') { idx = commits.length - 1; progress = 0; e.preventDefault(); return; }
+    else if (e.key === 'End') { idx = commitCount - 1; progress = 0; e.preventDefault(); return; }
     else if (e.key === ' ') {
       playing = !playing;
       document.getElementById('play').textContent = playing ? '❚❚' : '▶';
       e.preventDefault();
       return;
     } else { return; }
-    idx = Math.max(0, Math.min(commits.length - 1, idx + step));
+    idx = Math.max(0, Math.min(commitCount - 1, idx + step));
     progress = 0;
     e.preventDefault();
   });
@@ -518,8 +629,20 @@
   renderTimeline();
   updateCaret();
   render();
-  requestAnimationFrame(loop);
-})();
+  // Hide the loading overlay only after the first paint, otherwise a
+  // very tall timeline (thousands of segments) can still flash blank.
+  requestAnimationFrame(function () {
+    const loader = document.getElementById('loading');
+    if (loader && loader.parentNode) loader.parentNode.removeChild(loader);
+    requestAnimationFrame(loop);
+  });
+}
+
+// Kick off after first paint so the loading overlay shows before any
+// heavy work runs.
+requestAnimationFrame(function () {
+  requestAnimationFrame(bootGitfilm);
+});
 </script>
 </body>
 </html>
