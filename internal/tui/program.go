@@ -693,9 +693,12 @@ func (m programModel) renderRight(c model.Commit, width, height int) string {
 		return sb.String()
 	}
 
-	// Per-card height budget. We give each card up to 6 lines of diff
-	// when we have room; otherwise collapse to 1-line summaries.
-	const expandedCardLines = 7
+	// Per-card height budget. expandedCardLines = 1 header + N diff rows
+	// + 1 separator. Bumped from 7 to 11 so each card has 10 rows of
+	// diff to scroll through; long diffs (100+ lines) tail-scroll the
+	// typing cursor inside this window instead of being truncated at
+	// row 5 like before.
+	const expandedCardLines = 11
 	consumed := 5 // commit card height (subject, meta, body?, separator)
 	available := height - consumed
 	if available < 4 {
@@ -707,6 +710,13 @@ func (m programModel) renderRight(c model.Commit, width, height int) string {
 	}
 	if expandable > len(c.Files) {
 		expandable = len(c.Files)
+	}
+	// Per-card diff window. We give each card its share of `available`
+	// minus 1 row for the file header. Floor at 3 so a card always
+	// shows enough lines to read.
+	maxDiffLines := available/expandable - 1
+	if maxDiffLines < 3 {
+		maxDiffLines = 3
 	}
 
 	sep := styleDim.Render(strings.Repeat("─", width)) + "\n"
@@ -726,7 +736,7 @@ func (m programModel) renderRight(c model.Commit, width, height int) string {
 			sb.WriteString(sep)
 		}
 		if i < expandable {
-			sb.WriteString(renderFileCard(f, anim, width))
+			sb.WriteString(renderFileCard(f, anim, width, maxDiffLines))
 		} else {
 			sb.WriteString(renderFileLine(f, anim, width))
 			sb.WriteByte('\n')
@@ -750,7 +760,7 @@ func renderFileLine(f model.FileChange, a replay.FileAnim, width int) string {
 		stats)
 }
 
-func renderFileCard(f model.FileChange, a replay.FileAnim, width int) string {
+func renderFileCard(f model.FileChange, a replay.FileAnim, width int, maxDiffLines int) string {
 	var sb strings.Builder
 	mark := "▸"
 	markStyle := styleNew
@@ -764,27 +774,33 @@ func renderFileCard(f model.FileChange, a replay.FileAnim, width int) string {
 	header := markStyle.Render(mark) + " " +
 		statusBadge(f.Status) + " " +
 		styleFilePath.Render(pathLabel) + "  " + stats
+	if len(f.Hunks) > 1 {
+		hi := a.HunkIdx
+		if hi >= len(f.Hunks) {
+			hi = len(f.Hunks) - 1
+		}
+		header += "  " + styleDim.Render(fmt.Sprintf("hunk %d/%d", hi+1, len(f.Hunks)))
+	}
 	sb.WriteString(header)
 	sb.WriteByte('\n')
 
-	if len(f.Hunks) == 0 {
+	if len(f.Hunks) == 0 || maxDiffLines < 1 {
 		return sb.String()
 	}
-	// Show up to 5 lines around the typing cursor in the active hunk.
+
 	hi := a.HunkIdx
 	if hi >= len(f.Hunks) {
 		hi = len(f.Hunks) - 1
 	}
 	h := f.Hunks[hi]
-	maxLines := 5
-	shown := 0
-	for li, l := range h.Lines {
-		if shown >= maxLines {
-			break
-		}
-		if !a.Done && li > a.LineIdx {
-			break
-		}
+
+	start, end, hidden := cardLineWindow(a.LineIdx, len(h.Lines), maxDiffLines, a.Done)
+	if hidden > 0 {
+		sb.WriteString(styleDim.Render(fmt.Sprintf("    … %d earlier line%s", hidden, plural(hidden))))
+		sb.WriteByte('\n')
+	}
+	for li := start; li < end; li++ {
+		l := h.Lines[li]
 		text := l.Text
 		showCaret := false
 		if !a.Done && li == a.LineIdx && l.Kind == model.LineAdded {
@@ -804,9 +820,53 @@ func renderFileCard(f model.FileChange, a replay.FileAnim, width int) string {
 			sb.WriteString(styleDim.Render("    " + truncate(l.Text, width-5)))
 		}
 		sb.WriteByte('\n')
-		shown++
 	}
 	return sb.String()
+}
+
+// cardLineWindow picks the visible [start, end) slice of the active
+// hunk's lines so the typing cursor stays anchored at the bottom of
+// the window — i.e. tail-follow scrolling. When done, tails the end of
+// the hunk. The hidden return is the number of lines suppressed above
+// the window (used to print a "… N earlier" indicator and reserve a
+// row for it).
+//
+// Total visible rows == visibleRows in all cases (assuming totalLines
+// >= visibleRows): one row goes to the indicator when scrolled, the
+// rest to actual diff lines. This keeps the card's screen footprint
+// constant whether or not it's scrolling.
+func cardLineWindow(cursor, totalLines, visibleRows int, done bool) (start, end, hidden int) {
+	if totalLines <= 0 || visibleRows < 1 {
+		return 0, 0, 0
+	}
+	end = totalLines
+	if !done {
+		end = cursor + 1
+		if end > totalLines {
+			end = totalLines
+		}
+		if end < 1 {
+			end = 1
+		}
+	}
+	start = end - visibleRows
+	if start <= 0 {
+		return 0, end, 0
+	}
+	// Reserve one visible row for the "… N earlier" indicator.
+	start += 1
+	if start > end {
+		start = end
+	}
+	hidden = start
+	return start, end, hidden
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func (m programModel) renderFooter() string {
