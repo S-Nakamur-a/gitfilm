@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gitplay — {{.Branch}}</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --fg: #e6edf3;
+    --dim: #7d8590;
+    --add: #56d364;
+    --del: #f85149;
+    --feat: #d2a8ff;
+    --against: #79c0ff;
+    --new: #f0c674;
+    --panel: #161b22;
+  }
+  body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  header {
+    padding: 10px 16px; border-bottom: 1px solid #21262d;
+    display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+  }
+  header h1 { font-size: 14px; margin: 0; color: var(--feat); }
+  header .meta { color: var(--dim); }
+  main { display: grid; grid-template-columns: 360px 1fr; gap: 12px; padding: 12px; }
+  .panel { background: var(--panel); border: 1px solid #21262d; border-radius: 6px; padding: 12px; min-height: 60vh; max-height: calc(100vh - 180px); overflow-y: auto; }
+  .tree { font-size: 12px; }
+  .tree .row { white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+  .tree .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .tree .heat { width: 60px; height: 8px; background: #30363d; border-radius: 2px; overflow: hidden; }
+  .tree .heat span { display: block; height: 100%; background: var(--against); }
+  .tree .deleted { color: var(--dim); text-decoration: line-through; }
+  .tree .new { color: var(--new); }
+  .tree .faint { color: var(--dim); opacity: 0.55; }
+  .commit-card { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; }
+  .commit-subject { font-size: 14px; color: var(--fg); margin: 0 0 4px; }
+  .commit-author { color: var(--dim); font-size: 12px; }
+  .commit-body { color: var(--dim); white-space: pre-wrap; font-size: 12px; margin-top: 6px; max-height: 64px; overflow-y: auto; }
+  .files { display: grid; gap: 8px; }
+  .file-card { background: #0d1117; border: 1px solid #21262d; border-radius: 4px; padding: 6px 10px; }
+  .file-card .file-head { display: flex; gap: 8px; align-items: center; }
+  .file-card .file-head .stats { color: var(--dim); margin-left: auto; }
+  .file-card.done { opacity: 0.6; }
+  .file-card.done .file-head .check { color: var(--add); }
+  .file-card .progress { height: 2px; background: #21262d; border-radius: 1px; margin-top: 4px; overflow: hidden; }
+  .file-card .progress span { display: block; height: 100%; background: var(--new); transition: width 80ms linear; }
+  .file-card.done .progress span { background: var(--add); }
+  .hunk { padding: 4px 0 0; overflow-x: auto; }
+  .hunk .l { white-space: pre; font-size: 12px; }
+  .hunk .l.add { color: var(--add); }
+  .hunk .l.del { color: var(--del); }
+  .hunk .l.ctx { color: var(--dim); }
+  .caret { display: inline-block; width: 6px; background: var(--new); animation: blink 0.7s steps(2) infinite; }
+  @keyframes blink { to { background: transparent; } }
+  footer {
+    position: sticky; bottom: 0; background: var(--bg);
+    border-top: 1px solid #21262d; padding: 8px 16px;
+  }
+  .timeline { display: flex; height: 12px; border-radius: 2px; overflow: hidden; }
+  .timeline span { display: block; height: 100%; }
+  .timeline .feat { background: var(--feat); }
+  .timeline .against { background: var(--against); }
+  .controls { display: flex; gap: 8px; align-items: center; margin-top: 6px; color: var(--dim); }
+  .controls button { background: #21262d; color: var(--fg); border: 0; padding: 4px 10px; border-radius: 3px; cursor: pointer; }
+  .controls input[type=range] { flex: 1; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+  .badge.feat { background: rgba(210,168,255,.15); color: var(--feat); }
+  .badge.against { background: rgba(121,192,255,.15); color: var(--against); }
+</style>
+</head>
+<body>
+<header>
+  <h1>gitplay</h1>
+  <span class="meta"><strong id="branch"></strong> ⇒ <span id="against"></span></span>
+</header>
+<main>
+  <section class="panel tree" id="tree-panel"></section>
+  <section class="panel right">
+    <div class="commit-card">
+      <h2 class="commit-subject" id="commit-subject"></h2>
+      <div class="commit-author" id="commit-author"></div>
+      <div class="commit-body" id="commit-body"></div>
+    </div>
+    <div class="files" id="files"></div>
+  </section>
+</main>
+<footer>
+  <div class="timeline" id="timeline"></div>
+  <div class="controls">
+    <button id="play">▶</button>
+    <button id="prev">◀</button>
+    <button id="next">▶|</button>
+    <input type="range" id="scrubber" min="0" max="0" value="0" />
+    <span id="counter"></span>
+  </div>
+</footer>
+
+<script id="data" type="application/json">{{.Data}}</script>
+<script>
+(function () {
+  const data = JSON.parse(document.getElementById('data').textContent);
+  const commits = data.commits || [];
+  document.getElementById('branch').textContent = data.branch || '';
+  document.getElementById('against').textContent = data.against || '';
+
+  // ---- DOM helpers (no innerHTML; builds elements via textContent) ----
+  function el(tag, attrs, children) {
+    const n = document.createElement(tag);
+    if (attrs) {
+      for (const k in attrs) {
+        if (k === 'class') n.className = attrs[k];
+        else if (k === 'style') n.setAttribute('style', attrs[k]);
+        else n.setAttribute(k, attrs[k]);
+      }
+    }
+    if (children != null) {
+      const arr = Array.isArray(children) ? children : [children];
+      for (const c of arr) {
+        if (c == null) continue;
+        if (typeof c === 'string') n.appendChild(document.createTextNode(c));
+        else n.appendChild(c);
+      }
+    }
+    return n;
+  }
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  let idx = 0;
+  let playing = true;
+  let progress = 0; // 0..1 within current commit
+  const HALF_LIFE = 7;
+  const DECAY = Math.pow(0.5, 1 / HALF_LIFE);
+
+  // Precompute per-frame churn snapshots so scrubbing is O(1).
+  const snapshots = [];
+  {
+    const heat = new Map();
+    const touches = new Map();
+    const ghosts = new Set();
+    for (const c of commits) {
+      for (const k of heat.keys()) heat.set(k, heat.get(k) * DECAY);
+      const added = new Set();
+      for (const f of c.files) {
+        if (f.status === 'R' && f.old_path && f.old_path !== f.path) {
+          heat.set(f.path, (heat.get(f.path) || 0) + (heat.get(f.old_path) || 0));
+          touches.set(f.path, (touches.get(f.path) || 0) + (touches.get(f.old_path) || 0));
+          heat.delete(f.old_path);
+          touches.delete(f.old_path);
+        }
+        heat.set(f.path, (heat.get(f.path) || 0) + (f.added + f.removed));
+        touches.set(f.path, (touches.get(f.path) || 0) + 1);
+        if (f.status === 'A') { added.add(f.path); ghosts.delete(f.path); }
+        else if (f.status === 'D') { ghosts.add(f.path); }
+        else { ghosts.delete(f.path); }
+      }
+      snapshots.push({ heat: new Map(heat), touches: new Map(touches), ghosts: new Set(ghosts), added });
+    }
+  }
+
+  function heatColor(t) {
+    if (t < 0.25) return 'var(--against)';
+    if (t < 0.5) return '#f1e05a';
+    if (t < 0.75) return '#f0c674';
+    return 'var(--del)';
+  }
+
+  // Visibility thresholds for the B-strategy: hide files whose heat
+  // ratio drops below HIDDEN_BELOW; render files between HIDDEN_BELOW
+  // and FAINT_BELOW in a dim style.
+  const HIDDEN_BELOW = 0.005;
+  const FAINT_BELOW = 0.05;
+
+  function renderTree(snap) {
+    const panel = document.getElementById('tree-panel');
+    clear(panel);
+    const max = Math.max(0.0001, ...Array.from(snap.heat.values()));
+    const root = { children: new Map(), files: [] };
+    function ensure(parts) {
+      let cur = root;
+      for (const p of parts) {
+        if (!cur.children.has(p)) cur.children.set(p, { children: new Map(), files: [] });
+        cur = cur.children.get(p);
+      }
+      return cur;
+    }
+    const allPaths = new Set([...snap.heat.keys(), ...snap.ghosts]);
+    for (const path of allPaths) {
+      const parts = path.split('/');
+      const dir = ensure(parts.slice(0, -1));
+      if (snap.ghosts.has(path) && !snap.heat.has(path)) {
+        dir.files.push({ name: parts[parts.length - 1], path, deleted: true });
+        continue;
+      }
+      const heat = snap.heat.get(path) || 0;
+      const ratio = heat / max;
+      if (ratio < HIDDEN_BELOW) continue;
+      dir.files.push({
+        name: parts[parts.length - 1],
+        path,
+        heat,
+        ratio,
+        faint: ratio < FAINT_BELOW,
+        touches: snap.touches.get(path) || 0,
+        isNew: snap.added.has(path),
+        deleted: false,
+      });
+    }
+    // Recursively count visible descendants so we can prune empty dirs.
+    function visibleCount(node) {
+      let n = node.files.length;
+      for (const sub of node.children.values()) n += visibleCount(sub);
+      return n;
+    }
+    function walk(node, depth) {
+      const dirs = Array.from(node.children.entries()).sort();
+      for (const [name, sub] of dirs) {
+        if (visibleCount(sub) === 0) continue;
+        panel.appendChild(el('div', { class: 'row', style: 'padding-left:' + (depth * 12) + 'px' },
+          el('span', { class: 'name' }, name + '/')));
+        walk(sub, depth + 1);
+      }
+      const files = node.files.sort((a, b) => a.name.localeCompare(b.name));
+      for (const f of files) {
+        const cls = 'row ' + (f.deleted ? 'deleted' : (f.faint ? 'faint' : (f.isNew ? 'new' : '')));
+        const marker = f.deleted ? '👻 ' : (f.isNew ? '✨ ' : '');
+        const padding = 'padding-left:' + (depth * 12) + 'px';
+        if (f.deleted || f.faint) {
+          panel.appendChild(el('div', { class: cls, style: padding },
+            el('span', { class: 'name' }, marker + f.name)));
+          continue;
+        }
+        const heatPct = Math.round(f.ratio * 100);
+        const heatBar = el('span', { class: 'heat' },
+          el('span', { style: 'width:' + heatPct + '%; background:' + heatColor(f.ratio) }));
+        const touches = el('span', { style: 'color:var(--dim); width:30px; text-align:right' }, '×' + (f.touches || 0));
+        panel.appendChild(el('div', { class: cls, style: padding }, [
+          el('span', { class: 'name' }, marker + f.name),
+          heatBar,
+          touches,
+        ]));
+      }
+    }
+    walk(root, 0);
+  }
+
+  function renderTimeline() {
+    const tl = document.getElementById('timeline');
+    clear(tl);
+    if (!commits.length) return;
+    let runStart = 0;
+    for (let i = 1; i <= commits.length; i++) {
+      if (i === commits.length || commits[i].tag !== commits[i - 1].tag) {
+        const tag = commits[i - 1].tag;
+        const w = ((i - runStart) / commits.length) * 100;
+        tl.appendChild(el('span', { class: tag, style: 'width:' + w + '%' }));
+        runStart = i;
+      }
+    }
+    document.getElementById('scrubber').max = String(commits.length - 1);
+  }
+
+  function fileBudget(f) {
+    let total = 0;
+    for (let hi = 0; hi < f.hunks.length; hi++) {
+      const h = f.hunks[hi];
+      for (const l of h.lines) total += l.k === '+' ? l.t.length : 4;
+      if (hi < f.hunks.length - 1) total += 6;
+    }
+    return Math.max(8, total);
+  }
+
+  function commitMaxBudget(c) {
+    let max = 0;
+    for (const f of c.files) {
+      const b = fileBudget(f);
+      if (b > max) max = b;
+    }
+    return Math.max(8, max);
+  }
+
+  function applyFileAnim(f, budget) {
+    if (budget <= 0) return { hi: 0, li: 0, chars: 0, done: false };
+    let rem = budget;
+    for (let hi = 0; hi < f.hunks.length; hi++) {
+      const h = f.hunks[hi];
+      for (let li = 0; li < h.lines.length; li++) {
+        const l = h.lines[li];
+        if (l.k === '+') {
+          const n = l.t.length;
+          if (rem < n) return { hi, li, chars: rem, done: false };
+          rem -= n;
+        } else {
+          if (rem < 4) return { hi, li, chars: 0, done: false };
+          rem -= 4;
+        }
+      }
+      if (hi < f.hunks.length - 1) {
+        if (rem < 6) return { hi: hi + 1, li: 0, chars: 0, done: false };
+        rem -= 6;
+      }
+    }
+    return { hi: 0, li: 0, chars: -1, done: true };
+  }
+
+  function consumedFor(f, anim) {
+    if (anim.done) return fileBudget(f);
+    let consumed = 0;
+    for (let hi = 0; hi < f.hunks.length; hi++) {
+      const h = f.hunks[hi];
+      if (hi > anim.hi) break;
+      for (let li = 0; li < h.lines.length; li++) {
+        if (hi === anim.hi && li > anim.li) break;
+        const l = h.lines[li];
+        if (hi === anim.hi && li === anim.li) {
+          consumed += l.k === '+' ? anim.chars : 0;
+          break;
+        }
+        consumed += l.k === '+' ? l.t.length : 4;
+      }
+      if (hi < anim.hi && hi < f.hunks.length - 1) consumed += 6;
+    }
+    return consumed;
+  }
+
+  function renderCommitMeta(c) {
+    document.getElementById('commit-subject').textContent = c.subject || '';
+    document.getElementById('commit-body').textContent = c.body || '';
+    const author = document.getElementById('commit-author');
+    clear(author);
+    const short = c.short || (c.hash ? c.hash.slice(0, 7) : '');
+    author.appendChild(document.createTextNode((c.author_name || '') + ' · ' + (c.when || '') + ' · '));
+    author.appendChild(el('span', { class: 'badge ' + c.tag }, c.tag));
+    author.appendChild(document.createTextNode(' · ' + short));
+  }
+
+  function renderFileCard(f, anim) {
+    const card = el('div', { class: 'file-card' + (anim.done ? ' done' : '') });
+    const head = el('div', { class: 'file-head' }, [
+      el('span', { class: 'check' }, anim.done ? '✓' : '▸'),
+      el('span', { class: 'status' }, f.status),
+      el('span', { class: 'path' }, f.path),
+      el('span', { class: 'stats', style: 'color:var(--add)' }, '+' + f.added),
+      el('span', { class: 'stats', style: 'color:var(--del)' }, ' -' + f.removed),
+    ]);
+    card.appendChild(head);
+
+    if (f.hunks.length) {
+      const hi = Math.min(anim.hi, f.hunks.length - 1);
+      const h = f.hunks[hi];
+      const hunk = el('div', { class: 'hunk' });
+      let shown = 0;
+      const maxLines = 6;
+      for (let li = 0; li < h.lines.length; li++) {
+        if (shown >= maxLines) break;
+        if (!anim.done && li > anim.li) break;
+        const l = h.lines[li];
+        let text = l.t;
+        let caret = null;
+        if (!anim.done && li === anim.li && l.k === '+') {
+          text = text.slice(0, anim.chars);
+          caret = el('span', { class: 'caret' }, ' ');
+        }
+        const cls = l.k === '+' ? 'l add' : l.k === '-' ? 'l del' : 'l ctx';
+        const prefix = l.k === '+' ? '+ ' : l.k === '-' ? '- ' : '  ';
+        const row = el('div', { class: cls }, [prefix + text]);
+        if (caret) row.appendChild(caret);
+        hunk.appendChild(row);
+        shown++;
+      }
+      card.appendChild(hunk);
+    }
+
+    const total = fileBudget(f);
+    const pct = Math.min(100, (consumedFor(f, anim) / total) * 100);
+    card.appendChild(el('div', { class: 'progress' }, el('span', { style: 'width:' + pct + '%' })));
+    return card;
+  }
+
+  function renderRight(c, anims) {
+    renderCommitMeta(c);
+    const filesEl = document.getElementById('files');
+    clear(filesEl);
+    if (!c.files.length) {
+      filesEl.appendChild(el('div', { style: 'color:var(--dim)' }, '(no file changes in this commit)'));
+      return;
+    }
+    for (let i = 0; i < c.files.length; i++) {
+      filesEl.appendChild(renderFileCard(c.files[i], anims[i]));
+    }
+  }
+
+  // Avoid redoing expensive DOM work when nothing visible has changed.
+  // - The tree only changes when idx changes (snapshots are
+  //   per-commit, so within a commit it stays static).
+  // - The right pane only needs to update when idx changes OR when
+  //   any per-file animation cursor advances.
+  let lastIdxRendered = -1;
+  let lastRightSig = '';
+  let lastFileBudgets = null; // cached per-file budget for current commit
+  let lastBudgetIdx = -1;
+
+  function fileBudgetsFor(c) {
+    if (lastBudgetIdx === idx && lastFileBudgets) return lastFileBudgets;
+    lastFileBudgets = c.files.map(fileBudget);
+    lastBudgetIdx = idx;
+    return lastFileBudgets;
+  }
+
+  function currentAnims(c) {
+    const budgets = fileBudgetsFor(c);
+    const out = [];
+    for (let i = 0; i < c.files.length; i++) {
+      const fb = budgets[i];
+      const lb = Math.min(fb, Math.floor(progress * fb));
+      out.push(applyFileAnim(c.files[i], lb));
+    }
+    return out;
+  }
+
+  function sigOf(anims) {
+    let s = String(idx);
+    for (const a of anims) {
+      s += '|' + a.hi + ',' + a.li + ',' + a.chars + ',' + (a.done ? 1 : 0);
+    }
+    return s;
+  }
+
+  function render() {
+    if (!commits.length) return;
+    const c = commits[idx];
+    if (lastIdxRendered !== idx) {
+      document.getElementById('counter').textContent = (idx + 1) + '/' + commits.length;
+      document.getElementById('scrubber').value = String(idx);
+      renderTree(snapshots[idx]);
+      lastIdxRendered = idx;
+      lastRightSig = '';
+    }
+    const anims = currentAnims(c);
+    const sig = sigOf(anims);
+    if (sig !== lastRightSig) {
+      renderRight(c, anims);
+      lastRightSig = sig;
+    }
+  }
+
+  function step(dt) {
+    if (!playing) return;
+    const c = commits[idx];
+    const dwell = Math.max(0.6, Math.min(8, commitMaxBudget(c) / 60));
+    progress += dt / dwell;
+    if (progress >= 1) {
+      progress = 0;
+      if (idx < commits.length - 1) idx++;
+      else playing = false;
+    }
+  }
+
+  let last = performance.now();
+  function loop(t) {
+    const dt = (t - last) / 1000;
+    last = t;
+    step(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  document.getElementById('play').addEventListener('click', () => {
+    playing = !playing;
+    document.getElementById('play').textContent = playing ? '❚❚' : '▶';
+  });
+  document.getElementById('prev').addEventListener('click', () => {
+    if (idx > 0) { idx--; progress = 0; }
+  });
+  document.getElementById('next').addEventListener('click', () => {
+    if (idx < commits.length - 1) { idx++; progress = 0; }
+  });
+  document.getElementById('scrubber').addEventListener('input', (e) => {
+    idx = parseInt(e.target.value, 10) || 0; progress = 0;
+  });
+
+  renderTimeline();
+  render();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
