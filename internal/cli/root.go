@@ -19,15 +19,17 @@ import (
 )
 
 type options struct {
-	against   string
-	mode      string
-	repo      string
-	subdir    string
-	htmlOut   string
-	maxN      int
-	stats     bool
-	verbose   bool
-	colorMode string
+	against       string
+	mode          string
+	repo          string
+	subdir        string
+	htmlOut       string
+	maxN          int
+	stats         bool
+	verbose       bool
+	scramble      bool
+	scrambleAhead int
+	colorMode     string
 }
 
 func New() *cobra.Command {
@@ -51,6 +53,8 @@ func New() *cobra.Command {
 	cmd.Flags().IntVar(&opts.maxN, "max", 500, "limit to the most recent N commits (0 = no limit, careful on big repos)")
 	cmd.Flags().BoolVar(&opts.stats, "stats", false, "print load time, dwell distribution, and per-commit stats; do not render")
 	cmd.Flags().BoolVarP(&opts.verbose, "verbose", "v", false, "log per-stage timings and memory to stderr (always on for non-tui modes)")
+	cmd.Flags().BoolVar(&opts.scramble, "scramble", false, "render the typing animation as a 'movie decoder' effect: noisy characters that snap to the real text as they're typed")
+	cmd.Flags().IntVar(&opts.scrambleAhead, "scramble-ahead", 0, "with --scramble, how many runes of noise to draw ahead of the cursor (0 = default)")
 	cmd.Flags().StringVar(&opts.colorMode, "color-mode", "gradient", "timeline shading: gradient (truecolor brightness ramp per tag, default) | glyph (5-level quartile glyphs, for 16-color or low-fidelity terminals)")
 	return cmd
 }
@@ -86,7 +90,9 @@ func run(branch string, opts options) error {
 
 	if opts.mode == "tui" && !opts.stats {
 		return tui.RunStreamWithOptions(loader, req, tui.Options{
-			ColorMode: colorMode,
+			Scramble:      opts.scramble,
+			ScrambleAhead: opts.scrambleAhead,
+			ColorMode:     colorMode,
 		})
 	}
 
@@ -127,7 +133,11 @@ func run(branch string, opts options) error {
 	if !ok {
 		return fmt.Errorf("unknown output mode %q (want one of: %s)", opts.mode, strings.Join(output.Names(), ", "))
 	}
-	cfg := output.Config{HTMLOutPath: opts.htmlOut}
+	cfg := output.Config{
+		HTMLOutPath:   opts.htmlOut,
+		Scramble:      opts.scramble,
+		ScrambleAhead: opts.scrambleAhead,
+	}
 	renderStart := time.Now()
 	if err := r.Run(frames, cfg, os.Stderr); err != nil {
 		return err

@@ -67,13 +67,16 @@ type commitDetail struct {
 // the Go constants automatically flows through to the HTML output
 // without touching template.html.
 type tuningJSON struct {
-	LineCost      int     `json:"line_cost"`
-	HunkGap       int     `json:"hunk_gap"`
-	MinFileBudget int     `json:"min_file_budget"`
-	VisibleLines  int     `json:"visible_lines"`
-	HalfLife      float64 `json:"half_life"`
-	HiddenBelow   float64 `json:"hidden_below"`
-	FaintBelow    float64 `json:"faint_below"`
+	LineCost        int     `json:"line_cost"`
+	HunkGap         int     `json:"hunk_gap"`
+	MinFileBudget   int     `json:"min_file_budget"`
+	VisibleLines    int     `json:"visible_lines"`
+	HalfLife        float64 `json:"half_life"`
+	HiddenBelow     float64 `json:"hidden_below"`
+	FaintBelow      float64 `json:"faint_below"`
+	Scramble        bool    `json:"scramble"`
+	ScrambleAhead   int     `json:"scramble_ahead"`
+	ScrambleCharset string  `json:"scramble_charset,omitempty"`
 }
 
 type fileJSON struct {
@@ -133,9 +136,9 @@ type payloadStats struct {
 // bytes instead of O(commits) × diff-text bytes. Every commit
 // still gets one state.Step + one HeatSnapshotWith call, so
 // cost-of-build is the same as the single-payload version.
-func buildPayloadTimed(h model.History, diag io.Writer) (metaJSON, [][]commitDetail, payloadStats) {
+func buildPayloadTimed(h model.History, ropts RenderOptions, diag io.Writer) (metaJSON, [][]commitDetail, payloadStats) {
 	opts := replay.DefaultSnapshotOpts()
-	meta := newMeta(h, opts)
+	meta := newMeta(h, opts, ropts)
 	chunks := make([][]commitDetail, 0, (len(h.Commits)+detailChunkSize-1)/detailChunkSize)
 	var curChunk []commitDetail
 
@@ -185,19 +188,29 @@ func buildPayloadTimed(h model.History, diag io.Writer) (metaJSON, [][]commitDet
 	return meta, chunks, stats
 }
 
-func newMeta(h model.History, opts replay.SnapshotOpts) metaJSON {
+func newMeta(h model.History, opts replay.SnapshotOpts, ropts RenderOptions) metaJSON {
+	tuning := tuningJSON{
+		LineCost:      replay.LineCost,
+		HunkGap:       replay.HunkGap,
+		MinFileBudget: replay.MinFileBudget,
+		VisibleLines:  replay.VisibleLinesPerHunkHTML,
+		HalfLife:      replay.DefaultHalfLife,
+		HiddenBelow:   opts.HiddenBelow,
+		FaintBelow:    opts.FaintBelow,
+	}
+	if ropts.Scramble {
+		ahead := ropts.ScrambleAhead
+		if ahead <= 0 {
+			ahead = replay.DefaultScrambleAhead
+		}
+		tuning.Scramble = true
+		tuning.ScrambleAhead = ahead
+		tuning.ScrambleCharset = string(replay.DefaultScrambleCharset)
+	}
 	return metaJSON{
-		Branch:  h.Branch,
-		Against: h.Against,
-		Tuning: tuningJSON{
-			LineCost:      replay.LineCost,
-			HunkGap:       replay.HunkGap,
-			MinFileBudget: replay.MinFileBudget,
-			VisibleLines:  replay.VisibleLinesPerHunkHTML,
-			HalfLife:      replay.DefaultHalfLife,
-			HiddenBelow:   opts.HiddenBelow,
-			FaintBelow:    opts.FaintBelow,
-		},
+		Branch:      h.Branch,
+		Against:     h.Against,
+		Tuning:      tuning,
 		CommitCount: len(h.Commits),
 		ChunkSize:   detailChunkSize,
 		Summaries:   make([]commitSummary, 0, len(h.Commits)),

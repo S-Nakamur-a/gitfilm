@@ -26,13 +26,17 @@ func (m programModel) renderRight(c model.Commit, width, height int) string {
 	units := int(m.effectiveElapsed().Seconds() * replay.UnitsPerSecond)
 	sep := styleDim.Render(strings.Repeat("─", width)) + "\n"
 
+	// seed re-derives every frame so the scramble noise reshuffles.
+	// Throttle to half the tick rate so the shimmer reads as
+	// "flickering decode" rather than visual mush.
+	seed := int64(m.frame / 2)
 	for i, f := range c.Files {
 		anim := replay.ApplyFile(f, capUnits(units, replay.FileBudget(f)))
 		if i > 0 {
 			sb.WriteString(sep)
 		}
 		if i < expandable {
-			sb.WriteString(renderFileCard(f, anim, width, maxDiffLines))
+			sb.WriteString(renderFileCard(f, anim, width, maxDiffLines, m.scramble, seed))
 		} else {
 			sb.WriteString(renderFileLine(f, anim, width))
 			sb.WriteByte('\n')
@@ -113,7 +117,7 @@ func renderFileLine(f model.FileChange, a replay.FileAnim, width int) string {
 // diff window. The window anchors the typing cursor at the bottom,
 // so the user always sees the line being typed plus
 // preceding-context. When done with a hunk, tails the end.
-func renderFileCard(f model.FileChange, a replay.FileAnim, width int, maxDiffLines int) string {
+func renderFileCard(f model.FileChange, a replay.FileAnim, width int, maxDiffLines int, scramble replay.ScrambleConfig, seed int64) string {
 	var sb strings.Builder
 	sb.WriteString(fileCardHeader(f, a))
 	sb.WriteByte('\n')
@@ -134,7 +138,7 @@ func renderFileCard(f model.FileChange, a replay.FileAnim, width int, maxDiffLin
 		sb.WriteByte('\n')
 	}
 	for li := start; li < end; li++ {
-		writeDiffLine(&sb, h.Lines[li], a, li, width)
+		writeDiffLine(&sb, h.Lines[li], a, li, width, scramble, seed)
 	}
 	return sb.String()
 }
@@ -160,11 +164,13 @@ func fileCardHeader(f model.FileChange, a replay.FileAnim) string {
 	return header
 }
 
-func writeDiffLine(sb *strings.Builder, l model.DiffLine, a replay.FileAnim, li, width int) {
+func writeDiffLine(sb *strings.Builder, l model.DiffLine, a replay.FileAnim, li, width int, scramble replay.ScrambleConfig, seed int64) {
 	text := l.Text
 	showCaret := false
 	if !a.Done && li == a.LineIdx && l.Kind == model.LineAdded {
-		text = replay.PartialLine(l.Text, a.CharsInLine)
+		// ScrambleLine falls back to PartialLine when disabled, so
+		// we don't need to branch on scramble.Enabled here.
+		text = replay.ScrambleLine(l.Text, a.CharsInLine, seed, scramble)
 		showCaret = true
 	}
 	switch l.Kind {

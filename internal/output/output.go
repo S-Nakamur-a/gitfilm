@@ -18,6 +18,16 @@ type Config struct {
 	// HTMLOutPath is the destination file for the html renderer. Empty
 	// string falls back to the renderer's default ("gitfilm.html").
 	HTMLOutPath string
+
+	// Scramble turns on the "movie decoder" typing effect: characters
+	// ahead of the typing cursor render as flickering noise that
+	// snaps to the real text as the cursor reaches them. Both TUI
+	// and HTML honor this; off by default to preserve existing look.
+	Scramble bool
+
+	// ScrambleAhead is how many runes of noise are drawn after the
+	// locked prefix. Zero falls back to replay.DefaultScrambleAhead.
+	ScrambleAhead int
 }
 
 // Renderer renders a model.History according to the given config.

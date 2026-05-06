@@ -24,6 +24,10 @@ func (m programModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tickMsg:
+		// frame ticks every Update tick regardless of playback so the
+		// scramble shimmer keeps moving even when paused (otherwise
+		// the noise visibly freezes mid-line).
+		m.frame++
 		if m.playing {
 			m.dwellElapsed += frameTickMS
 			if m.effectiveElapsed() >= m.commitDwell {

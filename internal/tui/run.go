@@ -14,7 +14,7 @@ func Run(h model.History) error {
 	return runProgram(h, Options{})
 }
 
-// RunWithOptions is Run plus opt-in toggles.
+// RunWithOptions is Run plus opt-in toggles (e.g. scramble).
 func RunWithOptions(h model.History, opts Options) error {
 	return runProgram(h, opts)
 }
@@ -42,8 +42,8 @@ func RunStreamWithOptions(loader *gitlog.Loader, req gitlog.LoadRequest, opts Op
 // this is mostly here to keep the output.Names() listing honest.
 type renderer struct{}
 
-func (renderer) Run(h model.History, _ output.Config, _ io.Writer) error {
-	return runProgram(h, Options{})
+func (renderer) Run(h model.History, cfg output.Config, _ io.Writer) error {
+	return runProgram(h, Options{Scramble: cfg.Scramble, ScrambleAhead: cfg.ScrambleAhead})
 }
 
 func init() {

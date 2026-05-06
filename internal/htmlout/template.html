@@ -260,6 +260,46 @@ function runGitfilm(data) {
   const MIN_FILE_BUDGET = T.min_file_budget || 8;
   const HIDDEN_BELOW = T.hidden_below || 0.005;
   const FAINT_BELOW = T.faint_below || 0.05;
+  // Optional "movie decoder" typing effect. When SCRAMBLE is true,
+  // characters past the typing cursor render as flickering noise
+  // drawn from SCRAMBLE_CHARSET. The shimmer is driven by
+  // SCRAMBLE_SEED, which ticks every SCRAMBLE_TICK_MS regardless of
+  // playback so the effect reads as live decoding.
+  const SCRAMBLE = !!T.scramble;
+  const SCRAMBLE_AHEAD = T.scramble_ahead || 6;
+  const SCRAMBLE_CHARSET = T.scramble_charset
+    || 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*+=<>?/|{}[]~';
+  const SCRAMBLE_TICK_MS = 80;
+  const WORD_RE = /[A-Za-z0-9_]/;
+  function scrambleLine(text, chars, seed) {
+    if (!SCRAMBLE) return text.slice(0, chars);
+    if (chars >= text.length) return text;
+    if (chars < 0) chars = 0;
+    let stop = chars;
+    if (chars > 0) {
+      // Token-boundary round-forward: mirror replay.PartialLine so
+      // identifiers don't tear mid-word as the cursor advances. We
+      // peek up to two runes ahead.
+      for (let i = chars; i < text.length && i < chars + 2; i++) {
+        if (!WORD_RE.test(text[i - 1])) break;
+        if (!WORD_RE.test(text[i])) { stop = i; break; }
+      }
+      if (stop > text.length) stop = text.length;
+    }
+    const end = Math.min(text.length, stop + SCRAMBLE_AHEAD);
+    let out = text.slice(0, stop);
+    const pool = SCRAMBLE_CHARSET;
+    for (let i = stop; i < end; i++) {
+      // Cheap 32-bit mixer keyed by (seed, position). Lower bits of
+      // a multiply-add aren't great so we shift before %.
+      let s = ((seed | 0) * 374761393 + i * 668265263) | 0;
+      s = (s ^ (s >>> 13)) | 0;
+      s = (s * 1274126177) | 0;
+      s = (s ^ (s >>> 16)) >>> 0;
+      out += pool[s % pool.length];
+    }
+    return out;
+  }
 
   // Per-frame heat snapshots are reconstituted into Maps/Sets lazily.
   // Source data lives in the per-commit detail (chunk-loaded), so this
@@ -571,7 +611,7 @@ function runGitfilm(data) {
         let text = l.t;
         let caret = null;
         if (!anim.done && li === anim.li && l.k === '+') {
-          text = text.slice(0, anim.chars);
+          text = scrambleLine(text, anim.chars, scrambleSeed);
           caret = el('span', { class: 'caret' }, ' ');
         }
         const cls = l.k === '+' ? 'l add' : l.k === '-' ? 'l del' : 'l ctx';
@@ -610,6 +650,10 @@ function runGitfilm(data) {
   //   any per-file animation cursor advances.
   let lastIdxRendered = -1;
   let lastRightSig = '';
+  // scrambleSeed advances on a clock independent of play/pause so the
+  // noise keeps shimmering. When SCRAMBLE is off this stays 0 and
+  // contributes a stable component to the render signature.
+  let scrambleSeed = 0;
 
   function currentAnims(c) {
     const out = [];
@@ -628,6 +672,10 @@ function runGitfilm(data) {
     for (const a of anims) {
       s += '|' + a.hi + ',' + a.li + ',' + a.chars + ',' + (a.done ? 1 : 0);
     }
+    // Mix the seed in only when scramble is on; otherwise the cache
+    // gating from before still works perfectly (no needless redraws
+    // on every animation frame).
+    if (SCRAMBLE) s += '!' + scrambleSeed;
     return s;
   }
 
@@ -675,6 +723,7 @@ function runGitfilm(data) {
     const dt = (t - last) / 1000;
     last = t;
     step(dt);
+    if (SCRAMBLE) scrambleSeed = Math.floor(t / SCRAMBLE_TICK_MS);
     render();
     // Progress bar advances continuously within a commit, independent
     // of the idx/anim signature gating in render(). Cheap DOM op.

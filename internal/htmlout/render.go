@@ -39,6 +39,18 @@ const DefaultOutputPath = "gitfilm.html"
 // as a literal string.
 const chunkMarker = "<!--GITFILM_CHUNKS-->"
 
+// RenderOptions carries optional toggles for HTML rendering. Zero
+// value = baseline behaviour.
+type RenderOptions struct {
+	// Scramble turns on the "movie decoder" typing effect in the
+	// browser-side player.
+	Scramble bool
+	// ScrambleAhead is forwarded to the player as
+	// tuning.scramble_ahead. Zero falls back to
+	// replay.DefaultScrambleAhead.
+	ScrambleAhead int
+}
+
 // Render writes a single self-contained HTML file representing
 // the history. The page embeds all commit data, precomputed
 // playback budgets and per-frame heat snapshots as JSON, so the
@@ -70,8 +82,15 @@ func Render(w io.Writer, h model.History) error {
 // into it. This keeps initial paint quick and bounded regardless
 // of how many commits the history contains.
 func RenderWithDiag(w io.Writer, h model.History, diag io.Writer) error {
+	return RenderWithOptions(w, h, RenderOptions{}, diag)
+}
+
+// RenderWithOptions is RenderWithDiag plus opt-in toggles (e.g.
+// scramble). The defaults preserve the historical behaviour, so
+// existing callers can stay on Render/RenderWithDiag.
+func RenderWithOptions(w io.Writer, h model.History, opts RenderOptions, diag io.Writer) error {
 	tBuild := time.Now()
-	meta, chunks, payload := buildPayloadTimed(h, diag)
+	meta, chunks, payload := buildPayloadTimed(h, opts, diag)
 	dBuild := time.Since(tBuild)
 
 	head, tail, ok := strings.Cut(templateHTML, chunkMarker)
@@ -210,7 +229,7 @@ func (renderer) Run(h model.History, cfg output.Config, diag io.Writer) error {
 	}
 	defer f.Close()
 	t0 := time.Now()
-	if err := RenderWithDiag(f, h, diag); err != nil {
+	if err := RenderWithOptions(f, h, RenderOptions{Scramble: cfg.Scramble, ScrambleAhead: cfg.ScrambleAhead}, diag); err != nil {
 		return err
 	}
 	if diag != nil {

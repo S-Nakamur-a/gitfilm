@@ -124,6 +124,65 @@ func TestPartialLine_BoundsAndFull(t *testing.T) {
 	}
 }
 
+func TestScrambleLine_DisabledFallsBackToPartial(t *testing.T) {
+	got := ScrambleLine("func foo()", 4, 42, ScrambleConfig{})
+	if got != "func" {
+		t.Errorf("disabled = %q, want %q (PartialLine behaviour)", got, "func")
+	}
+}
+
+func TestScrambleLine_LockedPrefixThenNoise(t *testing.T) {
+	cfg := ScrambleConfig{Enabled: true, RevealAhead: 4, Charset: []rune("X")}
+	got := ScrambleLine("hello world", 5, 1, cfg)
+	// Locked prefix is "hello" (token boundary at index 5 since
+	// next rune ' ' is non-word). 4 noise chars from a single-char
+	// charset = "XXXX".
+	if got != "hello"+"XXXX" {
+		t.Errorf("got %q, want %q", got, "helloXXXX")
+	}
+}
+
+func TestScrambleLine_RevealAheadCapsAtLineEnd(t *testing.T) {
+	cfg := ScrambleConfig{Enabled: true, RevealAhead: 100, Charset: []rune("Z")}
+	got := ScrambleLine("ab", 0, 1, cfg)
+	// 2 runes of noise, no overflow past line end.
+	if got != "ZZ" {
+		t.Errorf("got %q, want %q (length capped at line end)", got, "ZZ")
+	}
+}
+
+func TestScrambleLine_FullyTypedReturnsText(t *testing.T) {
+	cfg := ScrambleConfig{Enabled: true, RevealAhead: 6, Charset: []rune("Z")}
+	if got := ScrambleLine("abc", 3, 1, cfg); got != "abc" {
+		t.Errorf("fully typed = %q, want %q", got, "abc")
+	}
+	if got := ScrambleLine("abc", 100, 1, cfg); got != "abc" {
+		t.Errorf("over-typed = %q, want %q", got, "abc")
+	}
+}
+
+func TestScrambleLine_DifferentSeedsShimmer(t *testing.T) {
+	// With a multi-char charset, two different seeds at the same
+	// (text, chars) should land on different noise — that's what
+	// makes the shimmer visible. Vanishingly unlikely false positive,
+	// but pick a long charset to make collisions astronomically rare.
+	cfg := ScrambleConfig{Enabled: true, RevealAhead: 8, Charset: DefaultScrambleCharset}
+	a := ScrambleLine("hello world", 0, 1, cfg)
+	b := ScrambleLine("hello world", 0, 2, cfg)
+	if a == b {
+		t.Errorf("different seeds produced identical noise: %q", a)
+	}
+}
+
+func TestScrambleLine_SameSeedIsDeterministic(t *testing.T) {
+	cfg := ScrambleConfig{Enabled: true, RevealAhead: 6, Charset: DefaultScrambleCharset}
+	a := ScrambleLine("hello world", 2, 99, cfg)
+	b := ScrambleLine("hello world", 2, 99, cfg)
+	if a != b {
+		t.Errorf("same seed not deterministic: %q vs %q", a, b)
+	}
+}
+
 func TestFileBudget_HasMinimumFloor(t *testing.T) {
 	if got := FileBudget(model.FileChange{}); got < MinFileBudget {
 		t.Errorf("empty file budget = %d, want >= %d", got, MinFileBudget)
@@ -145,7 +204,7 @@ func TestCommitMaxBudget_PicksLargest(t *testing.T) {
 // renderer's dwell doesn't include time for invisible later hunks.
 func TestFileBudgetWith_FirstHunkProfile_IgnoresLaterHunks(t *testing.T) {
 	f := mkFC(
-		mkHunk(added("ab")),                        // 2 units
+		mkHunk(added("ab")),                         // 2 units
 		mkHunk(added("zzzzzzzzzzzzzzzzzzzzzzzzzz")), // would be 26 units if visible
 	)
 	got := FileBudgetWith(f, FirstHunkProfile)

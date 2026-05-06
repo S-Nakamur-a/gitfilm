@@ -49,15 +49,23 @@ type programModel struct {
 
 	width, height int
 
+	// scramble configures the optional "movie decoder" typing
+	// effect. Read by view_right.go each frame; the per-frame seed
+	// comes from `frame`, which ticks once per Bubble Tea tick.
+	scramble replay.ScrambleConfig
+	frame    uint64
+
 	// colorMode selects the timeline density encoding (see
-	// ColorMode docstring below).
+	// ColorMode docstring above).
 	colorMode ColorMode
 }
 
 // Options carries optional behavioural toggles for the TUI entry
 // points. Zero value preserves existing behaviour.
 type Options struct {
-	ColorMode ColorMode
+	Scramble      bool
+	ScrambleAhead int
+	ColorMode     ColorMode
 }
 
 // ColorMode selects how the timeline density strip is shaded.
@@ -93,6 +101,17 @@ func ParseColorMode(s string) (ColorMode, error) {
 	}
 }
 
+func (o Options) scrambleConfig() replay.ScrambleConfig {
+	if !o.Scramble {
+		return replay.ScrambleConfig{}
+	}
+	ahead := o.ScrambleAhead
+	if ahead <= 0 {
+		ahead = replay.DefaultScrambleAhead
+	}
+	return replay.ScrambleConfig{Enabled: true, RevealAhead: ahead}
+}
+
 func newModel(h model.History, opts Options) programModel {
 	st := replay.NewTreeState(replay.DefaultHalfLife)
 	if len(h.Commits) > 0 {
@@ -104,6 +123,7 @@ func newModel(h model.History, opts Options) programModel {
 		idx:       0,
 		playing:   true,
 		playSpeed: 1.0,
+		scramble:  opts.scrambleConfig(),
 		colorMode: opts.ColorMode,
 	}
 	if len(h.Commits) > 0 {
@@ -122,6 +142,7 @@ func newStreamingModel(branch, against string, ch <-chan gitlog.LoadBatch, opts 
 		idx:       0,
 		playing:   true,
 		playSpeed: 1.0,
+		scramble:  opts.scrambleConfig(),
 		colorMode: opts.ColorMode,
 	}
 }
