@@ -14,6 +14,14 @@
     --against: #79c0ff;
     --new: #f0c674;
     --panel: #161b22;
+    /* Heat ramp: a single amber→orange hue going dim→bright so the
+       four tiers read as one intensity scale, not four categories.
+       Mirrors heatPalette in internal/tui/style.go. Retheme by
+       editing these four values (and the Go side). */
+    --heat-cool:   #875f00;
+    --heat-warm:   #af5f00;
+    --heat-hot:    #d75f00;
+    --heat-active: #ff8700;
   }
   body {
     margin: 0; padding: 0;
@@ -378,11 +386,13 @@ function runGitfilm(data) {
     return snap;
   }
 
+  // Mirrors heatTierIndex / heatPalette in internal/tui/style.go.
+  // Returns a CSS var so theming is one place — edit :root.
   function heatColor(t) {
-    if (t < 0.25) return 'var(--against)';
-    if (t < 0.5) return '#f1e05a';
-    if (t < 0.75) return '#f0c674';
-    return 'var(--del)';
+    if (t < 0.25) return 'var(--heat-cool)';
+    if (t < 0.5)  return 'var(--heat-warm)';
+    if (t < 0.75) return 'var(--heat-hot)';
+    return 'var(--heat-active)';
   }
 
   function renderTree(snap) {

@@ -22,28 +22,65 @@ var (
 	styleAgst     = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
 	stylePane     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 
-	// Heat-tier styles for the tree pane filename and the footer
-	// legend. Same colors are used for both so the user learns the
-	// scale once.
-	styleHeatCool   = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	styleHeatWarm   = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
-	styleHeatHot    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	styleHeatActive = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 )
+
+// heatTier is one row of the heat-color scale. The same tier drives
+// the tree filename color, the treemap cell colors, and the footer
+// legend, so the user learns one scale that holds across views.
+//
+// Why a single-hue ramp (amber → bright orange) instead of four
+// unrelated hues: distinct hues read as four *categories* (blue is
+// not "less than" yellow). A monochrome ramp reads as one continuous
+// intensity, which matches what `HeatRatio` actually means.
+type heatTier struct {
+	Name      string         // legend label
+	TreeFG    lipgloss.Color // filename color in the tree pane
+	TreemapBG lipgloss.Color // cell background in the treemap
+	TreemapFG lipgloss.Color // label color drawn over the bg
+	Bold      bool           // bold the tree name (used for the top tier)
+}
+
+// heatPalette is the *only* place heat colors are defined. Edit this
+// table to retheme; downstream call sites all derive from it.
+//
+// Tier boundaries are quartiles of HeatRatio:
+//
+//	[0.00, 0.25) cool    [0.25, 0.50) warm
+//	[0.50, 0.75) hot     [0.75, 1.00] active
+//
+// The ramp is xterm 94 → 130 → 166 → 208 (#875f00 → #ff8700), an
+// amber-to-orange progression. We avoid the red end of the spectrum
+// because the right pane already uses red for `del` lines.
+var heatPalette = [4]heatTier{
+	{Name: "cool", TreeFG: lipgloss.Color("94"), TreemapBG: lipgloss.Color("94"), TreemapFG: lipgloss.Color("231")},
+	{Name: "warm", TreeFG: lipgloss.Color("130"), TreemapBG: lipgloss.Color("130"), TreemapFG: lipgloss.Color("231")},
+	{Name: "hot", TreeFG: lipgloss.Color("166"), TreemapBG: lipgloss.Color("166"), TreemapFG: lipgloss.Color("232")},
+	{Name: "active", TreeFG: lipgloss.Color("208"), TreemapBG: lipgloss.Color("208"), TreemapFG: lipgloss.Color("232"), Bold: true},
+}
+
+// heatTierIndex maps a HeatRatio in [0,1] onto the heatPalette index.
+func heatTierIndex(ratio float64) int {
+	switch {
+	case ratio < 0.25:
+		return 0
+	case ratio < 0.5:
+		return 1
+	case ratio < 0.75:
+		return 2
+	default:
+		return 3
+	}
+}
 
 // heatNameStyle picks the style that should color a tree filename
 // based on its heat ratio. Same tiers as the footer legend.
 func heatNameStyle(ratio float64) lipgloss.Style {
-	switch {
-	case ratio < 0.25:
-		return styleHeatCool
-	case ratio < 0.5:
-		return styleHeatWarm
-	case ratio < 0.75:
-		return styleHeatHot
-	default:
-		return styleHeatActive
+	t := heatPalette[heatTierIndex(ratio)]
+	s := lipgloss.NewStyle().Foreground(t.TreeFG)
+	if t.Bold {
+		s = s.Bold(true)
 	}
+	return s
 }
 
 // tagLabel renders the bracketed branch-tag chip used in headers.

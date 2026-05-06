@@ -204,6 +204,10 @@ func humanSpan(d time.Duration) string {
 }
 
 func footerLegend(againstName string) string {
+	heatChips := make([]string, 0, len(heatPalette))
+	for i, t := range heatPalette {
+		heatChips = append(heatChips, heatNameStyle(heatTierMidpoint(i)).Render(t.Name))
+	}
 	return strings.Join([]string{
 		styleFeat.Render("█ feat"),
 		styleAgst.Render("█ " + againstName),
@@ -211,12 +215,15 @@ func footerLegend(againstName string) string {
 		styleDel.Render("- del"),
 		styleNew.Render("✨ new"),
 		styleGhost.Render("👻 deleted"),
-		"heat: " +
-			styleHeatCool.Render("cool") + " " +
-			styleHeatWarm.Render("warm") + " " +
-			styleHeatHot.Render("hot") + " " +
-			styleHeatActive.Render("active"),
+		"heat: " + strings.Join(heatChips, " "),
 	}, "  ")
+}
+
+// heatTierMidpoint returns a HeatRatio that lands squarely inside the
+// given palette tier — used by the legend so each chip renders in its
+// own tier color without a magic number per tier.
+func heatTierMidpoint(tier int) float64 {
+	return 0.25*float64(tier) + 0.125
 }
 
 func (m programModel) footerHint() string {

@@ -109,24 +109,24 @@ func (m programModel) treemapItems() []replay.TreemapItem {
 // over the heat color, hurting both legibility and the ratio cue.
 const minLabelW = 6
 
+// treemapColdCellFG / BG paint cells whose heat ratio is below
+// FaintBelow — the file is barely warm, so the cell should fade into
+// the background instead of asserting itself in the heat ramp.
+const (
+	treemapColdCellFG = lipgloss.Color("245")
+	treemapColdCellBG = lipgloss.Color("236")
+)
+
 // treemapCellColors picks (foreground, background) for a treemap
-// cell based on its heat ratio. We use the same heat tiers as the
-// tree-list so users learn one scale across both views; the bg/fg
-// pairing is chosen so labels (drawn over the cell in fg) stay
-// legible against the same-hue bg.
+// cell based on its heat ratio. The 4 main tiers are derived from
+// heatPalette so the tree-list and the treemap share one scale; an
+// extra "cold" tier below 0.05 is grayed out.
 func treemapCellColors(ratio float64) (lipgloss.Color, lipgloss.Color) {
-	switch {
-	case ratio < 0.05:
-		return lipgloss.Color("245"), lipgloss.Color("236")
-	case ratio < 0.25:
-		return lipgloss.Color("231"), lipgloss.Color("24")
-	case ratio < 0.5:
-		return lipgloss.Color("233"), lipgloss.Color("226")
-	case ratio < 0.75:
-		return lipgloss.Color("232"), lipgloss.Color("214")
-	default:
-		return lipgloss.Color("231"), lipgloss.Color("196")
+	if ratio < 0.05 {
+		return treemapColdCellFG, treemapColdCellBG
 	}
+	t := heatPalette[heatTierIndex(ratio)]
+	return t.TreemapFG, t.TreemapBG
 }
 
 // cellGrid is a width×height array of (glyph, fg, bg) cells. We
