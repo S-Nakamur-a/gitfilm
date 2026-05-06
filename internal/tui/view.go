@@ -7,6 +7,7 @@ import (
 
 	"github.com/S-Nakamur-a/gitfilm/internal/model"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // View is the single Bubble Tea render entry point. It composes
@@ -113,7 +114,10 @@ func (m programModel) renderSubject(c model.Commit, width int) string {
 	subject := truncate(c.Subject, width)
 	line := styleSubject.Render(subject)
 	if body := firstNonEmptyLine(c.Body); body != "" {
-		line += "  " + styleDim.Render(truncate(body, width-len([]rune(subject))-3))
+		// ansi.StringWidth counts visible cells (so a CJK/emoji-laden
+		// subject leaves the right amount of room for the body),
+		// where len([]rune(...)) would undercount wide characters.
+		line += "  " + styleDim.Render(truncate(body, width-ansi.StringWidth(subject)-3))
 	}
 	return line
 }

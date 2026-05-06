@@ -6,6 +6,7 @@ import (
 
 	"github.com/S-Nakamur-a/gitfilm/internal/replay"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // renderLeftPane dispatches between the tree-list and the treemap
@@ -165,21 +166,32 @@ func fillRect(g *cellGrid, x0, y0, x1, y1 int, fg, bg lipgloss.Color) {
 
 // drawLabel writes the file's basename into the top-left of a
 // rectangle. Truncates with an ellipsis if it doesn't fit.
+//
+// `i` from `for i, r := range name` is a *byte* index, not a cell
+// index; using it as a grid column miscolumns multibyte names and
+// `name[:maxW-1]` byte-slices can land mid-codepoint. Both are
+// avoided by gating on visible width with ansi.StringWidth/Truncate
+// and stepping the grid column by 1 per rune.
 func drawLabel(g *cellGrid, path string, x, y, maxW int, fg, bg lipgloss.Color) {
+	if maxW < 1 {
+		return
+	}
 	name := basenameOf(path)
-	if len(name) > maxW {
+	if ansi.StringWidth(name) > maxW {
 		if maxW < 2 {
 			return
 		}
-		name = name[:maxW-1] + "…"
+		name = ansi.Truncate(name, maxW, "…")
 	}
-	for i, r := range name {
-		if x+i >= g.w {
+	col := 0
+	for _, r := range name {
+		if x+col >= g.w {
 			break
 		}
-		g.chars[y][x+i] = r
-		g.fgs[y][x+i] = fg
-		g.bgs[y][x+i] = bg
+		g.chars[y][x+col] = r
+		g.fgs[y][x+col] = fg
+		g.bgs[y][x+col] = bg
+		col++
 	}
 }
 

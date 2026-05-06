@@ -7,6 +7,7 @@ import (
 
 	"github.com/S-Nakamur-a/gitfilm/internal/model"
 	"github.com/S-Nakamur-a/gitfilm/internal/replay"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // renderRight paints the commit-summary card at the top of the
@@ -63,7 +64,9 @@ func writeGapBanner(sb *strings.Builder, gap time.Duration, width int) {
 		return
 	}
 	core := "— " + label + " —"
-	pad := width - len([]rune(core))
+	// ansi.StringWidth so wide chars in localized labels don't
+	// over-pad the banner; for ASCII labels the result is identical.
+	pad := width - ansi.StringWidth(core)
 	if pad < 0 {
 		pad = 0
 	}

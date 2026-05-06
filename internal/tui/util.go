@@ -26,21 +26,17 @@ func clipPane(s string, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
-// truncate caps the rune-length of s at max, using "…" as the
-// elision marker when content is dropped. Operates on runes so
-// multibyte characters aren't cut mid-codepoint.
+// truncate caps the *visible cell width* of s at max, using "…" as
+// the elision marker when content is dropped. Delegates to
+// ansi.Truncate so the cut respects ANSI escape boundaries (no
+// broken CSI bleeding into neighboring panes) and counts wide
+// characters (CJK / emoji) as 2 cells. Plain ASCII callers get the
+// same behavior as the previous rune-count implementation.
 func truncate(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	if max < 1 {
-		return ""
-	}
-	return string(r[:max-1]) + "…"
+	return ansi.Truncate(s, max, "…")
 }
 
 // firstNonEmptyLine returns the first non-blank line of s, trimmed.
