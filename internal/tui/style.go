@@ -18,10 +18,15 @@ var (
 	styleDel      = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	styleNew      = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
 	styleGhost    = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Faint(true)
-	styleFeat     = lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
-	styleAgst     = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
-	stylePane     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-
+	// styleCold is used for "exists but not active" rows: the cold
+	// tier of real files in the seeded set, plus the …(N files)
+	// placeholders that summarize cold subtrees and sibling groups.
+	// Deliberately one shade darker than styleDim so the eye learns
+	// "cold = repo context, dim = inline annotation".
+	styleCold = lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Faint(true)
+	styleFeat = lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
+	styleAgst = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
+	stylePane = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 )
 
 // heatTier is one row of the heat-color scale. The same tier drives

@@ -45,9 +45,11 @@ func (m *programModel) jumpTo(target int) {
 }
 
 // nearestSnapshot returns the snapshot whose stepping range ends
-// closest at or before target. Falls back to a fresh empty
-// TreeState (representing "before commit 0") with baseIdx = -1
-// when no snapshot is suitable.
+// closest at or before target. Falls back to a "before commit 0"
+// state (with baseIdx = -1) when no snapshot is suitable. When a
+// seedBase is present that fallback Clone preserves the seeded
+// existing-set so backward jumps to the very start still render
+// the surrounding repo context.
 func (m *programModel) nearestSnapshot(target int) (int, *replay.TreeState) {
 	bucket := target / snapshotInterval
 	if bucket < len(m.snapshots) && m.snapshots[bucket] != nil {
@@ -57,6 +59,9 @@ func (m *programModel) nearestSnapshot(target int) (int, *replay.TreeState) {
 		if b < len(m.snapshots) && m.snapshots[b] != nil {
 			return b*snapshotInterval + (snapshotInterval - 1), m.snapshots[b]
 		}
+	}
+	if m.seedBase != nil {
+		return -1, m.seedBase
 	}
 	return -1, replay.NewTreeState(replay.DefaultHalfLife)
 }

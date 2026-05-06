@@ -38,8 +38,13 @@ func (l *Loader) logf(format string, args ...interface{}) {
 }
 
 // Runner is the seam used to shell out to git. Tests replace it with a fake.
+//
+// RunStdin behaves like Run but pipes the given bytes to the child
+// process's stdin. Used by `git check-attr --stdin` so we can query
+// linguist-* attributes for thousands of paths in a single fork/exec.
 type Runner interface {
 	Run(args ...string) ([]byte, error)
+	RunStdin(stdin []byte, args ...string) ([]byte, error)
 }
 
 // NewLoader constructs a Loader using the real git binary in the given repo.
@@ -56,6 +61,18 @@ type execRunner struct{ repoPath string }
 
 func (e *execRunner) Run(args ...string) ([]byte, error) {
 	cmd := exec.Command("git", append([]string{"-C", e.repoPath}, args...)...)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
+	}
+	return out.Bytes(), nil
+}
+
+func (e *execRunner) RunStdin(stdin []byte, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", append([]string{"-C", e.repoPath}, args...)...)
+	cmd.Stdin = bytes.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb

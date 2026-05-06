@@ -25,6 +25,12 @@ func (f *fakeRunner) Run(args ...string) ([]byte, error) {
 	return nil, fmt.Errorf("unexpected git invocation: %s", key)
 }
 
+// RunStdin satisfies the Runner interface; tests that don't exercise
+// the seed path can ignore the stdin arg. Behaves identically to Run.
+func (f *fakeRunner) RunStdin(_ []byte, args ...string) ([]byte, error) {
+	return f.Run(args...)
+}
+
 // commitChunk returns the bytes that `git log -p --format=...` would
 // emit for a single commit using our marker-line format.
 func commitChunk(hash, subject, body, diff string) string {

@@ -15,6 +15,17 @@ const DefaultHalfLife = 7.0
 
 // TreeNode is a directory or file in the live filesystem view.
 // Children are kept in a stable order (dirs first, then alphabetical).
+//
+// Three kinds of nodes coexist in the tree:
+//
+//  1. Real file (IsDir=false, CollapsedCount=0): rendered with a heat
+//     tier color (or Faint / Cold for cooler ones).
+//  2. Real directory (IsDir=true, CollapsedCount=0): expanded; its
+//     Children are rendered indented underneath.
+//  3. Placeholder (CollapsedCount>0): a "summary" row that stands in
+//     for one or more cold descendants. It is never recursed into;
+//     IsDir indicates *what kind* of thing it summarizes (a cold
+//     subtree if true, a bag of cold sibling files if false).
 type TreeNode struct {
 	Name      string
 	Path      string // full path from the repo root (or subdir)
@@ -24,9 +35,27 @@ type TreeNode struct {
 	Heat      float64
 	HeatRatio float64 // Heat / MaxHeat at snapshot time, useful for filtering
 	Faint     bool    // true when heat is decayed but not yet hidden
-	Status    model.ChangeStatus
-	NewInThis bool // true if this file was added in the current frame
-	Children  []*TreeNode
+	// Cold marks "exists at this commit but heat is below the hidden
+	// threshold". Cold nodes are kept in the tree for context (so the
+	// user sees that a file or dir is still there) but rendered in a
+	// neutral, dim style with no heat color or marker. A cold leaf
+	// only appears when its path was seeded via Seed() — files added
+	// during the load window that subsequently decayed are also
+	// retained as cold so the user does not see them disappear.
+	Cold bool
+	// CollapsedCount > 0 marks this node as a placeholder for N cold
+	// items that were folded out of view to keep the pane uncluttered.
+	// IsDir tells the renderer which template to use:
+	//
+	//   - IsDir=true:  "<name>/  …(N files)" — a cold subtree
+	//   - IsDir=false: "…(N more files)"     — a bag of cold siblings
+	//
+	// Placeholders never have Children; they are leaves in the
+	// rendered sense even when IsDir is true.
+	CollapsedCount int
+	Status         model.ChangeStatus
+	NewInThis      bool // true if this file was added in the current frame
+	Children       []*TreeNode
 }
 
 // SnapshotOpts controls visibility filtering when materializing a
@@ -51,6 +80,19 @@ type TreeState struct {
 	deleted  map[string]bool // path -> still ghosting
 	added    map[string]bool // freshly added in the current frame (cleared by next Step)
 	statuses map[string]model.ChangeStatus
+
+	// existing is the set of paths that already lived in the working
+	// tree before the loaded window's first commit. Seeded once via
+	// Seed() (typically from `git ls-tree` against the parent of the
+	// oldest loaded commit), it lets the snapshot show those paths as
+	// cold context even when they receive zero touches in the window.
+	// Without this seed a `--max 100` view would show only the files
+	// whose history happened to fall inside the window — i.e. tiny
+	// fragments of the actual repo with no surrounding structure.
+	//
+	// existing has no effect on heat math; it is purely a "candidate
+	// set" extension consulted at Snapshot time.
+	existing map[string]bool
 
 	// loc is the cumulative net line count per file (added − removed
 	// across all commits applied so far). Heat decays so it can't be
@@ -77,17 +119,18 @@ type TreeState struct {
 // replay history from the very beginning each time.
 func (t *TreeState) Clone() *TreeState {
 	c := &TreeState{
-		heat:       make(map[string]float64, len(t.heat)),
-		touches:    make(map[string]int, len(t.touches)),
-		deleted:    make(map[string]bool, len(t.deleted)),
-		added:      make(map[string]bool, len(t.added)),
-		statuses:   make(map[string]model.ChangeStatus, len(t.statuses)),
-		loc:        make(map[string]int, len(t.loc)),
+		heat:         make(map[string]float64, len(t.heat)),
+		touches:      make(map[string]int, len(t.touches)),
+		deleted:      make(map[string]bool, len(t.deleted)),
+		added:        make(map[string]bool, len(t.added)),
+		statuses:     make(map[string]model.ChangeStatus, len(t.statuses)),
+		loc:          make(map[string]int, len(t.loc)),
+		existing:     make(map[string]bool, len(t.existing)),
 		totalAdded:   t.totalAdded,
 		totalRemoved: t.totalRemoved,
 		totalCommits: t.totalCommits,
-		halfLife:   t.halfLife,
-		decay:      t.decay,
+		halfLife:     t.halfLife,
+		decay:        t.decay,
 	}
 	for k, v := range t.heat {
 		c.heat[k] = v
@@ -107,6 +150,9 @@ func (t *TreeState) Clone() *TreeState {
 	for k, v := range t.loc {
 		c.loc[k] = v
 	}
+	for k, v := range t.existing {
+		c.existing[k] = v
+	}
 	return c
 }
 
@@ -118,6 +164,7 @@ func NewTreeState(halfLife float64) *TreeState {
 		added:    make(map[string]bool),
 		statuses: make(map[string]model.ChangeStatus),
 		loc:      make(map[string]int),
+		existing: make(map[string]bool),
 		halfLife: halfLife,
 	}
 	if halfLife > 0 {
@@ -126,6 +173,23 @@ func NewTreeState(halfLife float64) *TreeState {
 		t.decay = 1.0
 	}
 	return t
+}
+
+// Seed marks the given paths as "already existing at this commit",
+// without contributing any heat or touches. The snapshot will render
+// them as cold context rows so the user sees the surrounding repo
+// structure even when those files are not modified inside the loaded
+// window. Safe to call multiple times; later calls accumulate.
+//
+// Paths added later via Step (StatusAdded) are independently tracked
+// in `touches` and do not need to be seeded.
+func (t *TreeState) Seed(paths []string) {
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		t.existing[p] = true
+	}
 }
 
 // Step advances state by one commit.
@@ -144,6 +208,10 @@ func (t *TreeState) Step(c model.Commit) {
 			t.heat[f.Path] += t.heat[f.OldPath]
 			t.touches[f.Path] += t.touches[f.OldPath]
 			t.loc[f.Path] += t.loc[f.OldPath]
+			if t.existing[f.OldPath] {
+				t.existing[f.Path] = true
+				delete(t.existing, f.OldPath)
+			}
 			delete(t.heat, f.OldPath)
 			delete(t.touches, f.OldPath)
 			delete(t.statuses, f.OldPath)
@@ -168,6 +236,10 @@ func (t *TreeState) Step(c model.Commit) {
 		case model.StatusDeleted:
 			t.deleted[f.Path] = true
 			delete(t.loc, f.Path)
+			// Drop from the seed too: a deleted path no longer
+			// "exists at this commit" and should not resurrect as a
+			// cold row once the ghost expires.
+			delete(t.existing, f.Path)
 		default:
 			delete(t.deleted, f.Path)
 		}
@@ -233,12 +305,22 @@ func (t *TreeState) Snapshot() *TreeNode {
 }
 
 // SnapshotWith materializes the current state, applying the given
-// visibility thresholds. Files whose heat ratio falls below
-// HiddenBelow are dropped entirely; deleted (ghost) files are always
-// kept short-term because the deletion event itself is information.
+// visibility thresholds.
 //
-// Empty directories that result from filtering are pruned, so the
-// tree naturally collapses around active areas.
+// Candidate paths are the union of "ever touched in the window" and
+// "seeded as existing before the window". Of those:
+//
+//   - heat ratio >= FaintBelow → rendered with a heat tier color.
+//   - HiddenBelow ≤ ratio < FaintBelow → marked Faint (still a real
+//     row, but dim).
+//   - ratio < HiddenBelow → marked Cold; collapsed by collapseCold
+//     into a single placeholder row per dir / sibling group so the
+//     pane stays readable on big repos.
+//
+// Cold paths that were neither seeded nor touched are dropped (they
+// would carry no signal — only the seed gives us a reason to keep
+// long-cold paths visible). Deleted (ghost) files always render
+// separately because the deletion event itself is information.
 func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 	max := 0.0
 	for _, v := range t.heat {
@@ -250,14 +332,30 @@ func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 		max = 1
 	}
 	root := &TreeNode{Name: "", Path: "", IsDir: true}
-	for path := range t.touches {
-		if t.deleted[path] {
-			continue
+
+	// Walk the union of touched-in-window and seeded paths in a single
+	// pass. A `seen` set prevents double-insertion when a path is in
+	// both sets.
+	//
+	// Visibility rule:
+	//   - Hot/warm/faint paths: always shown (heat ratio above
+	//     HiddenBelow).
+	//   - Cold paths: shown only if seeded. A path that was touched
+	//     in the window but has decayed below HiddenBelow is dropped
+	//     (this preserves the long-standing "tree shows recent
+	//     activity" property; the seed is the dedicated mechanism
+	//     for surfacing static context, not stale activity).
+	seen := make(map[string]bool, len(t.touches)+len(t.existing))
+	insertCandidate := func(path string) {
+		if path == "" || seen[path] || t.deleted[path] {
+			return
 		}
+		seen[path] = true
 		heat := t.heat[path]
 		ratio := heat / max
-		if ratio < opts.HiddenBelow {
-			continue
+		isCold := ratio < opts.HiddenBelow
+		if isCold && !t.existing[path] {
+			return
 		}
 		insertNode(root, path, &TreeNode{
 			Name:      basePath(path),
@@ -266,11 +364,19 @@ func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 			Touches:   t.touches[path],
 			Heat:      heat,
 			HeatRatio: ratio,
-			Faint:     ratio < opts.FaintBelow,
+			Cold:      isCold,
+			Faint:     !isCold && ratio < opts.FaintBelow,
 			Status:    t.statuses[path],
 			NewInThis: t.added[path],
 		})
 	}
+	for path := range t.touches {
+		insertCandidate(path)
+	}
+	for path := range t.existing {
+		insertCandidate(path)
+	}
+
 	for path := range t.deleted {
 		insertNode(root, path, &TreeNode{
 			Name:    basePath(path),
@@ -282,7 +388,7 @@ func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 		})
 	}
 	sortTree(root)
-	pruneEmptyDirs(root)
+	collapseCold(root)
 	return root
 }
 
@@ -394,22 +500,95 @@ func (t *TreeState) HeatSnapshotWith(opts SnapshotOpts) HeatSnapshot {
 	return hs
 }
 
-// pruneEmptyDirs removes directory nodes whose entire subtree is
-// empty (i.e. all leaves were filtered out by visibility thresholds).
-// Returns true if the node passed in is itself prunable.
-func pruneEmptyDirs(n *TreeNode) bool {
+// collapseCold walks the tree and folds cold subtrees / cold sibling
+// groups into single placeholder rows so the pane stays readable on
+// big repos. Returns true if n contains any "hot" descendant (a real
+// file that is not Cold, or a Deleted ghost — deletion is information).
+//
+// Rules:
+//
+//  1. A directory whose entire subtree is cold becomes a single
+//     placeholder row (Children dropped, CollapsedCount = total cold
+//     files under it). The placeholder keeps the dir's own name so
+//     the user can still see "vendor/ … (1247 files)" instead of
+//     watching vendor evaporate.
+//  2. A directory that hosts at least one hot descendant keeps its
+//     hot children (recursed normally) and aggregates its remaining
+//     cold *file* siblings into a single trailing placeholder row
+//     ("…(N more files)"). Cold *subdirectory* siblings each remain
+//     as their own collapsed placeholder so the user sees which
+//     neighborhoods are nearby.
+//
+// The root node is never collapsed; rules apply to its children.
+func collapseCold(n *TreeNode) bool {
 	if !n.IsDir {
-		return false
+		// Real leaves: hot iff not cold and not deleted... actually
+		// deleted ghosts also count as "hot" for the purposes of
+		// keeping their parent dir alive — the deletion event is
+		// information the user should see.
+		return !n.Cold || n.Deleted
 	}
-	kept := n.Children[:0]
+
+	hotChildren := make([]*TreeNode, 0, len(n.Children))
+	coldFileCount := 0
+	coldDirPlaceholders := make([]*TreeNode, 0)
+
 	for _, c := range n.Children {
-		if c.IsDir && pruneEmptyDirs(c) {
+		hot := collapseCold(c)
+		if hot {
+			hotChildren = append(hotChildren, c)
 			continue
 		}
-		kept = append(kept, c)
+		if c.IsDir {
+			// Convert a cold subdir into a placeholder row. If the
+			// dir has no surviving descendants (because they were
+			// filtered out by insertCandidate before collapseCold
+			// runs), drop it entirely — a "(0 files)" placeholder
+			// would just be noise.
+			count := countLeafFiles(c)
+			if count == 0 {
+				continue
+			}
+			c.Children = nil
+			c.Cold = true
+			c.CollapsedCount = count
+			coldDirPlaceholders = append(coldDirPlaceholders, c)
+		} else {
+			// Cold leaf — aggregated into a single sibling row below.
+			coldFileCount++
+		}
 	}
-	n.Children = kept
-	return n.IsDir && len(n.Children) == 0
+
+	n.Children = hotChildren
+	if coldFileCount > 0 {
+		n.Children = append(n.Children, &TreeNode{
+			Name:           "…",
+			IsDir:          false,
+			Cold:           true,
+			CollapsedCount: coldFileCount,
+		})
+	}
+	n.Children = append(n.Children, coldDirPlaceholders...)
+	return len(hotChildren) > 0
+}
+
+// countLeafFiles totals real file leaves under n. Placeholders that
+// have already been converted from cold subtrees report their stored
+// CollapsedCount instead of their (now-empty) child list — without
+// this the count would zero out at the outer recursion level when an
+// inner level had already collapsed.
+func countLeafFiles(n *TreeNode) int {
+	if n.CollapsedCount > 0 {
+		return n.CollapsedCount
+	}
+	if !n.IsDir {
+		return 1
+	}
+	total := 0
+	for _, c := range n.Children {
+		total += countLeafFiles(c)
+	}
+	return total
 }
 
 func insertNode(root *TreeNode, path string, leaf *TreeNode) {

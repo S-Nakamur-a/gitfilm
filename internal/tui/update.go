@@ -134,9 +134,11 @@ func (m programModel) applyBatch(b gitlog.LoadBatch) (tea.Model, tea.Cmd) {
 			}
 		}
 		// First batch: bootstrap m.tree at idx=0 so the first
-		// frame has something to render.
+		// frame has something to render. Reuse the TreeState built
+		// in newStreamingModel rather than allocating a new one —
+		// any seed paths the loader pre-populated must survive into
+		// the rendered tree.
 		if startIdx == 0 && len(m.history.Commits) > 0 {
-			m.tree = replay.NewTreeState(replay.DefaultHalfLife)
 			m.tree.Step(m.history.Commits[0])
 			m.commitDwell = m.computeDwell()
 		}

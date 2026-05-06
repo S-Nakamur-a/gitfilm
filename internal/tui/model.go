@@ -29,6 +29,13 @@ type programModel struct {
 	// of the replay when navigating backwards.
 	snapshots []*replay.TreeState
 
+	// seedBase holds a TreeState with only the seed paths applied
+	// (no commits stepped). nearestSnapshot Clones this when no
+	// periodic snapshot is suitable, so backward jumps to the very
+	// beginning still see the seeded "existing" set instead of an
+	// empty tree. nil when no seed was provided.
+	seedBase *replay.TreeState
+
 	// addsAt[i] / removesAt[i] are the per-commit added / removed
 	// line counts for commits[i]; filesAt[i] is the cumulative
 	// unique-files count AFTER stepping commits[i]. Adds and removes
@@ -100,6 +107,14 @@ type Options struct {
 	Scramble      bool
 	ScrambleAhead int
 	ColorMode     ColorMode
+
+	// SeedPaths pre-populates the live filesystem view with paths
+	// that already existed at the parent of the oldest loaded
+	// commit. The TUI shows them as cold context rows so the user
+	// sees the surrounding repo structure even with --max truncation.
+	// Empty (nil) disables seeding — the tree will only contain
+	// paths touched within the loaded window.
+	SeedPaths []string
 }
 
 // ColorMode selects how the timeline density strip is shaded.
@@ -147,13 +162,19 @@ func (o Options) scrambleConfig() replay.ScrambleConfig {
 }
 
 func newModel(h model.History, opts Options) programModel {
+	var seedBase *replay.TreeState
 	st := replay.NewTreeState(replay.DefaultHalfLife)
+	if len(opts.SeedPaths) > 0 {
+		st.Seed(opts.SeedPaths)
+		seedBase = st.Clone()
+	}
 	if len(h.Commits) > 0 {
 		st.Step(h.Commits[0])
 	}
 	m := programModel{
 		history:   h,
 		tree:      st,
+		seedBase:  seedBase,
 		idx:       0,
 		playing:   true,
 		playSpeed: 1.0,
@@ -185,10 +206,25 @@ func newModel(h model.History, opts Options) programModel {
 }
 
 func newStreamingModel(branch, against string, ch <-chan gitlog.LoadBatch, opts Options) programModel {
+	tree := replay.NewTreeState(replay.DefaultHalfLife)
+	headTree := replay.NewTreeState(replay.DefaultHalfLife)
+	var seedBase *replay.TreeState
+	if len(opts.SeedPaths) > 0 {
+		// Seed both trees: m.tree drives the user-visible pane,
+		// m.headTree is the deepest-loaded snapshot used for cache
+		// bucketing. They diverge only as the user scrubs back. The
+		// seed-only Clone is held as seedBase so backward jumps that
+		// fall before the first snapshot bucket can still rebuild
+		// from the seed instead of starting empty.
+		tree.Seed(opts.SeedPaths)
+		headTree.Seed(opts.SeedPaths)
+		seedBase = tree.Clone()
+	}
 	return programModel{
 		history:   model.History{Branch: branch, Against: against},
-		tree:      replay.NewTreeState(replay.DefaultHalfLife),
-		headTree:  replay.NewTreeState(replay.DefaultHalfLife),
+		tree:      tree,
+		headTree:  headTree,
+		seedBase:  seedBase,
 		loadCh:    ch,
 		loading:   true,
 		idx:       0,

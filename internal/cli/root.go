@@ -30,6 +30,9 @@ type options struct {
 	scramble      bool
 	scrambleAhead int
 	colorMode     string
+	seedTree      string
+	showVendored  bool
+	showGenerated bool
 }
 
 func New() *cobra.Command {
@@ -56,6 +59,9 @@ func New() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.scramble, "scramble", false, "render the typing animation as a 'movie decoder' effect: noisy characters that snap to the real text as they're typed")
 	cmd.Flags().IntVar(&opts.scrambleAhead, "scramble-ahead", 0, "with --scramble, how many runes of noise to draw ahead of the cursor (0 = default)")
 	cmd.Flags().StringVar(&opts.colorMode, "color-mode", "gradient", "timeline shading: gradient (truecolor brightness ramp per tag, default) | glyph (5-level quartile glyphs, for 16-color or low-fidelity terminals)")
+	cmd.Flags().StringVar(&opts.seedTree, "seed-tree", "auto", "pre-populate the TUI tree with files that exist before --max truncates: auto (on when --max>0) | on | off")
+	cmd.Flags().BoolVar(&opts.showVendored, "show-vendored", false, "include linguist-vendored paths (vendor/, node_modules/) in the seed")
+	cmd.Flags().BoolVar(&opts.showGenerated, "show-generated", false, "include linguist-generated paths (lockfiles, codegen) in the seed")
 	return cmd
 }
 
@@ -89,10 +95,18 @@ func run(branch string, opts options) error {
 	}
 
 	if opts.mode == "tui" && !opts.stats {
+		seedPaths, err := resolveSeed(loader, req, opts)
+		if err != nil {
+			// Seed failure is informational only — fall through with no
+			// seed rather than aborting the whole run.
+			fmt.Fprintf(os.Stderr, "[gitfilm] seed: %v (continuing without seed)\n", err)
+			seedPaths = nil
+		}
 		return tui.RunStreamWithOptions(loader, req, tui.Options{
 			Scramble:      opts.scramble,
 			ScrambleAhead: opts.scrambleAhead,
 			ColorMode:     colorMode,
+			SeedPaths:     seedPaths,
 		})
 	}
 
@@ -151,6 +165,35 @@ func run(branch string, opts options) error {
 			float64(mem.Alloc)/1024/1024, float64(mem.Sys)/1024/1024)
 	}
 	return nil
+}
+
+// resolveSeed turns the user-facing --seed-tree / --show-vendored /
+// --show-generated flags into a concrete path list. Returns (nil, nil)
+// when seeding is disabled (either explicitly via --seed-tree=off or
+// implicitly when --max=0 leaves no "before the window" to describe).
+func resolveSeed(loader *gitlog.Loader, req gitlog.LoadRequest, opts options) ([]string, error) {
+	enabled := false
+	switch opts.seedTree {
+	case "on":
+		enabled = true
+	case "off":
+		return nil, nil
+	case "", "auto":
+		enabled = req.MaxN > 0
+	default:
+		return nil, fmt.Errorf("unknown --seed-tree %q (want auto|on|off)", opts.seedTree)
+	}
+	if !enabled {
+		return nil, nil
+	}
+	res, err := loader.LoadSeed(req, gitlog.SeedOptions{
+		IncludeVendored:  opts.showVendored,
+		IncludeGenerated: opts.showGenerated,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res.Paths, nil
 }
 
 // printStats verifies the perf wins from the recent tuning by

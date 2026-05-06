@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/S-Nakamur-a/gitfilm/internal/replay"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // renderTree paints the left pane: a filesystem tree where each
@@ -20,7 +21,12 @@ func (m programModel) renderTree(width int) string {
 
 func renderNode(sb *strings.Builder, n *replay.TreeNode, prefix string, isRoot bool, width int) {
 	if !isRoot {
-		sb.WriteString(truncate(treeRow(n, prefix), width))
+		// treeRow returns a string with embedded ANSI escapes from
+		// heat / status styles; rune-based truncation can cut mid-CSI
+		// and let a broken escape eat the right pane's border. Use
+		// ansi.Truncate so the cut respects escape boundaries and
+		// counts visible width, not bytes.
+		sb.WriteString(ansi.Truncate(treeRow(n, prefix), width, "…"))
 		sb.WriteByte('\n')
 	}
 	for i, c := range n.Children {
@@ -46,10 +52,22 @@ func treeRow(n *replay.TreeNode, prefix string) string {
 		name = name + "/"
 	}
 	switch {
+	case n.CollapsedCount > 0 && n.IsDir:
+		// Cold subtree placeholder: "<dirname>/  …(N files)".
+		return prefix + styleCold.Render(fmt.Sprintf("%s  …(%d %s)", name, n.CollapsedCount, pluralFiles(n.CollapsedCount)))
+	case n.CollapsedCount > 0:
+		// Sibling-leaves placeholder: "…(N more files)".
+		return prefix + styleCold.Render(fmt.Sprintf("…(%d more %s)", n.CollapsedCount, pluralFiles(n.CollapsedCount)))
 	case n.Deleted:
 		return prefix + styleGhost.Render("👻 "+name+" (deleted)")
 	case n.IsDir:
 		return prefix + name
+	case n.Cold:
+		// Real cold leaf — kept visible because it was seeded but
+		// never made it into a placeholder aggregation (e.g. it is
+		// the only child of an otherwise-hot dir). Render with no
+		// marker, no heat color.
+		return prefix + styleCold.Render(name)
 	case n.Faint:
 		return prefix + treeMarker(n) + styleGhost.Render(name)
 	default:
@@ -59,6 +77,17 @@ func treeRow(n *replay.TreeNode, prefix string) string {
 		}
 		return prefix + treeMarker(n) + heatNameStyle(n.HeatRatio).Render(name) + touches
 	}
+}
+
+// pluralFiles returns "file" or "files" depending on n. The existing
+// pluralS helper in util.go appends a suffix to one word, but here we
+// want the noun itself; expanding inline keeps the format string
+// readable without complicating pluralS's contract.
+func pluralFiles(n int) string {
+	if n == 1 {
+		return "file"
+	}
+	return "files"
 }
 
 func treeMarker(n *replay.TreeNode) string {
