@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/S-Nakamur-a/gitfilm/internal/gitlog"
@@ -47,9 +48,52 @@ type programModel struct {
 	playSpeed float64
 
 	width, height int
+
+	// colorMode selects the timeline density encoding (see
+	// ColorMode docstring below).
+	colorMode ColorMode
 }
 
-func newModel(h model.History) programModel {
+// Options carries optional behavioural toggles for the TUI entry
+// points. Zero value preserves existing behaviour.
+type Options struct {
+	ColorMode ColorMode
+}
+
+// ColorMode selects how the timeline density strip is shaded.
+//
+//   - ColorModeGradient (the default) holds the glyph fixed at "█"
+//     and varies foreground brightness across a per-tag truecolor
+//     ramp. Lipgloss snaps the ramp to the nearest available colors
+//     on 256-color terminals (visible banding but still legible) and
+//     loses fidelity on 16-color terminals — pick "glyph" there.
+//   - ColorModeGlyph is the historical 5-glyph quartile encoding
+//     (· ░ ▒ ▓ █). Coarser, but works identically on any terminal
+//     and reads well against any background. Choose this when
+//     running over a flaky SSH/tmux chain or in a 16-color shell.
+type ColorMode int
+
+const (
+	ColorModeGradient ColorMode = iota
+	ColorModeGlyph
+)
+
+// ParseColorMode maps the CLI flag value to a ColorMode. Empty and
+// "gradient" both resolve to gradient (so an unset flag matches the
+// CLI default). Returns an error rather than silently defaulting so
+// typos surface immediately.
+func ParseColorMode(s string) (ColorMode, error) {
+	switch s {
+	case "", "gradient":
+		return ColorModeGradient, nil
+	case "glyph":
+		return ColorModeGlyph, nil
+	default:
+		return ColorModeGradient, fmt.Errorf("unknown color-mode %q (want one of: gradient, glyph)", s)
+	}
+}
+
+func newModel(h model.History, opts Options) programModel {
 	st := replay.NewTreeState(replay.DefaultHalfLife)
 	if len(h.Commits) > 0 {
 		st.Step(h.Commits[0])
@@ -60,6 +104,7 @@ func newModel(h model.History) programModel {
 		idx:       0,
 		playing:   true,
 		playSpeed: 1.0,
+		colorMode: opts.ColorMode,
 	}
 	if len(h.Commits) > 0 {
 		m.commitDwell = m.computeDwell()
@@ -67,7 +112,7 @@ func newModel(h model.History) programModel {
 	return m
 }
 
-func newStreamingModel(branch, against string, ch <-chan gitlog.LoadBatch) programModel {
+func newStreamingModel(branch, against string, ch <-chan gitlog.LoadBatch, opts Options) programModel {
 	return programModel{
 		history:   model.History{Branch: branch, Against: against},
 		tree:      replay.NewTreeState(replay.DefaultHalfLife),
@@ -77,6 +122,7 @@ func newStreamingModel(branch, against string, ch <-chan gitlog.LoadBatch) progr
 		idx:       0,
 		playing:   true,
 		playSpeed: 1.0,
+		colorMode: opts.ColorMode,
 	}
 }
 

@@ -19,14 +19,15 @@ import (
 )
 
 type options struct {
-	against string
-	mode    string
-	repo    string
-	subdir  string
-	htmlOut string
-	maxN    int
-	stats   bool
-	verbose bool
+	against   string
+	mode      string
+	repo      string
+	subdir    string
+	htmlOut   string
+	maxN      int
+	stats     bool
+	verbose   bool
+	colorMode string
 }
 
 func New() *cobra.Command {
@@ -50,6 +51,7 @@ func New() *cobra.Command {
 	cmd.Flags().IntVar(&opts.maxN, "max", 500, "limit to the most recent N commits (0 = no limit, careful on big repos)")
 	cmd.Flags().BoolVar(&opts.stats, "stats", false, "print load time, dwell distribution, and per-commit stats; do not render")
 	cmd.Flags().BoolVarP(&opts.verbose, "verbose", "v", false, "log per-stage timings and memory to stderr (always on for non-tui modes)")
+	cmd.Flags().StringVar(&opts.colorMode, "color-mode", "gradient", "timeline shading: gradient (truecolor brightness ramp per tag, default) | glyph (5-level quartile glyphs, for 16-color or low-fidelity terminals)")
 	return cmd
 }
 
@@ -77,8 +79,15 @@ func run(branch string, opts options) error {
 	// oldest shard arrives instead of after the full Load. Skips the
 	// renderer registry because output.Renderer.Run wants a complete
 	// History upfront, which defeats the point.
+	colorMode, err := tui.ParseColorMode(opts.colorMode)
+	if err != nil {
+		return err
+	}
+
 	if opts.mode == "tui" && !opts.stats {
-		return tui.RunStream(loader, req)
+		return tui.RunStreamWithOptions(loader, req, tui.Options{
+			ColorMode: colorMode,
+		})
 	}
 
 	loadStart := time.Now()

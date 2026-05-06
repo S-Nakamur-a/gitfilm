@@ -29,8 +29,8 @@ func DwellFor(c model.Commit) time.Duration { return replay.DwellFor(c) }
 
 // runProgram is the legacy / sync entry point: takes a fully
 // loaded History and starts the Bubble Tea program.
-func runProgram(h model.History) error {
-	m := newModel(h)
+func runProgram(h model.History, opts Options) error {
+	m := newModel(h, opts)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
@@ -39,8 +39,8 @@ func runProgram(h model.History) error {
 // runStreamingProgram drives the TUI off a streaming loader. The
 // channel is consumed inside Update via waitForBatch so all state
 // mutations stay on the Bubble Tea event-loop goroutine.
-func runStreamingProgram(branch, against string, ch <-chan gitlog.LoadBatch) error {
-	m := newStreamingModel(branch, against, ch)
+func runStreamingProgram(branch, against string, ch <-chan gitlog.LoadBatch, opts Options) error {
+	m := newStreamingModel(branch, against, ch, opts)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err

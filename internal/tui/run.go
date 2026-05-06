@@ -11,7 +11,12 @@ import (
 // Run is the historical entrypoint for fully-loaded histories. Kept
 // for callers that already have a History in hand (e.g. tests).
 func Run(h model.History) error {
-	return runProgram(h)
+	return runProgram(h, Options{})
+}
+
+// RunWithOptions is Run plus opt-in toggles.
+func RunWithOptions(h model.History, opts Options) error {
+	return runProgram(h, opts)
 }
 
 // RunStream drives the TUI off a streaming loader: the first frame
@@ -23,8 +28,13 @@ func Run(h model.History) error {
 // Wires the loader and the TUI program directly so the CLI doesn't
 // need to know about the channel plumbing.
 func RunStream(loader *gitlog.Loader, req gitlog.LoadRequest) error {
+	return RunStreamWithOptions(loader, req, Options{})
+}
+
+// RunStreamWithOptions is RunStream plus opt-in toggles.
+func RunStreamWithOptions(loader *gitlog.Loader, req gitlog.LoadRequest, opts Options) error {
 	ch := loader.LoadStream(req)
-	return runStreamingProgram(req.Branch, req.Against, ch)
+	return runStreamingProgram(req.Branch, req.Against, ch, opts)
 }
 
 // renderer adapts the TUI to the output.Renderer interface for the
@@ -33,7 +43,7 @@ func RunStream(loader *gitlog.Loader, req gitlog.LoadRequest) error {
 type renderer struct{}
 
 func (renderer) Run(h model.History, _ output.Config, _ io.Writer) error {
-	return runProgram(h)
+	return runProgram(h, Options{})
 }
 
 func init() {
