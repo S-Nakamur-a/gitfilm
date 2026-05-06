@@ -41,8 +41,8 @@ const (
 //
 // Breakdown: header(1) + subject(1) + pane border(2) + footer
 // rows. Footer = commit-progress(1) + timeline cells(1) +
-// caret(1) + HUD(1) + legend(1) + hint(1) = 6.
-const approxChromeRows = 10
+// caret(1) + HUD(1) + spark(1) + legend(1) + hint(1) = 7.
+const approxChromeRows = 11
 
 // Pacing knobs that don't fit cleanly inside replay (which is
 // renderer-agnostic). frameTickMS is how often Update fires; finer

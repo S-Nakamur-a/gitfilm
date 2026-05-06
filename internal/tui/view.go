@@ -130,10 +130,15 @@ func (m programModel) renderFooter() string {
 	progress := m.renderCommitProgress(barW)
 	bar := m.renderTimelineBar(barW)
 	hud := m.renderHUD()
+	spark := m.renderMiniGraphs(barW)
 	legend := footerLegend(m.history.Against)
 	hint := m.footerHint()
 
-	parts := []string{progress, bar, hud, legend, hint}
+	parts := []string{progress, bar, hud}
+	if spark != "" {
+		parts = append(parts, spark)
+	}
+	parts = append(parts, legend, hint)
 	out := strings.Join(parts, "\n")
 	// Bar contributes 2 lines (cells + caret); everything else 1.
 	// Compute height from the actual content so future structural

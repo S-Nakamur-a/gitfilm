@@ -64,9 +64,9 @@ type TreeState struct {
 	// monotonic (Step only adds) so the running-counters HUD can
 	// read them in O(1) without rewalking history. Snapshots/Clones
 	// preserve them so backward navigation lands on the right total.
-	cumAdded   int
-	cumRemoved int
-	cumCommits int
+	totalAdded   int
+	totalRemoved int
+	totalCommits int
 
 	halfLife float64
 	decay    float64
@@ -83,9 +83,9 @@ func (t *TreeState) Clone() *TreeState {
 		added:      make(map[string]bool, len(t.added)),
 		statuses:   make(map[string]model.ChangeStatus, len(t.statuses)),
 		loc:        make(map[string]int, len(t.loc)),
-		cumAdded:   t.cumAdded,
-		cumRemoved: t.cumRemoved,
-		cumCommits: t.cumCommits,
+		totalAdded:   t.totalAdded,
+		totalRemoved: t.totalRemoved,
+		totalCommits: t.totalCommits,
 		halfLife:   t.halfLife,
 		decay:      t.decay,
 	}
@@ -137,7 +137,7 @@ func (t *TreeState) Step(c model.Commit) {
 	}
 	// freshly-added flags reset every frame
 	t.added = make(map[string]bool)
-	t.cumCommits++
+	t.totalCommits++
 
 	for _, f := range c.Files {
 		if f.Status == model.StatusRenamed && f.OldPath != "" && f.OldPath != f.Path {
@@ -152,8 +152,8 @@ func (t *TreeState) Step(c model.Commit) {
 		t.heat[f.Path] += float64(f.Added + f.Removed)
 		t.touches[f.Path]++
 		t.statuses[f.Path] = f.Status
-		t.cumAdded += f.Added
-		t.cumRemoved += f.Removed
+		t.totalAdded += f.Added
+		t.totalRemoved += f.Removed
 		// Net LOC for this file. Floor at 0 because git diffs don't
 		// always reach absolute LOC=0 on heavy refactors and a
 		// negative value would skew the treemap weights.
@@ -219,10 +219,10 @@ type Counts struct {
 // O(1); does not allocate.
 func (t *TreeState) Counts() Counts {
 	return Counts{
-		Added:       t.cumAdded,
-		Removed:     t.cumRemoved,
+		Added:       t.totalAdded,
+		Removed:     t.totalRemoved,
 		UniqueFiles: len(t.touches),
-		Commits:     t.cumCommits,
+		Commits:     t.totalCommits,
 	}
 }
 

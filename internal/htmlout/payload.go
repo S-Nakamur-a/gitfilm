@@ -60,8 +60,13 @@ type commitSummary struct {
 	MaxBudget   int    `json:"max_budget"`
 	Added       int    `json:"added"`
 	Removed     int    `json:"removed"`
-	GapMS       int64  `json:"gap_ms"`   // wall-clock ms since previous commit
-	GapTier     string `json:"gap_tier"` // "" / "hint" / "banner"
+	// TotalFiles is the cumulative unique-file count after stepping
+	// this commit (matches what TreeState.Counts().UniqueFiles
+	// would return at that point). Powers the "files" mini-graph
+	// without forcing the player to parse every chunk's snapshot.
+	TotalFiles int    `json:"total_files"`
+	GapMS      int64  `json:"gap_ms"`   // wall-clock ms since previous commit
+	GapTier    string `json:"gap_tier"` // "" / "hint" / "banner"
 }
 
 // commitDetail is the heavyweight per-commit record. Lives inside
@@ -185,7 +190,7 @@ func buildPayloadTimed(h model.History, ropts RenderOptions, diag io.Writer) (me
 		}
 
 		ts = time.Now()
-		meta.Summaries = append(meta.Summaries, commitSummaryFor(c, gap))
+		meta.Summaries = append(meta.Summaries, commitSummaryFor(c, gap, state.Counts().UniqueFiles))
 		curChunk = append(curChunk, commitDetailFor(c, snap))
 		if len(curChunk) >= detailChunkSize {
 			chunks = append(chunks, curChunk)
@@ -228,7 +233,7 @@ func newMeta(h model.History, opts replay.SnapshotOpts, ropts RenderOptions) met
 	}
 }
 
-func commitSummaryFor(c model.Commit, gap time.Duration) commitSummary {
+func commitSummaryFor(c model.Commit, gap time.Duration, totalFiles int) commitSummary {
 	added, removed := 0, 0
 	for _, f := range c.Files {
 		added += f.Added
@@ -248,6 +253,7 @@ func commitSummaryFor(c model.Commit, gap time.Duration) commitSummary {
 		DwellMS:     dwell.Milliseconds(),
 		Added:       added,
 		Removed:     removed,
+		TotalFiles:  totalFiles,
 		GapMS:       gap.Milliseconds(),
 		GapTier:     gapTierJSON(replay.ClassifyGap(gap)),
 	}

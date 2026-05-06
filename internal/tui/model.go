@@ -29,6 +29,14 @@ type programModel struct {
 	// of the replay when navigating backwards.
 	snapshots []*replay.TreeState
 
+	// linesAt[i] is the per-commit churn (added+removed) for
+	// commits[i]; filesAt[i] is the cumulative unique-files count
+	// AFTER stepping commits[i]. Both grow as batches arrive so
+	// the footer mini-graphs can render whatever is loaded so far.
+	// Indexed parallel to history.Commits.
+	linesAt []int
+	filesAt []int
+
 	// Streaming state. loadCh is nil when the program was given a
 	// pre-built history; when non-nil, the model pulls commits in
 	// batches and grows m.history over time.
@@ -148,8 +156,23 @@ func newModel(h model.History, opts Options) programModel {
 		scramble:  opts.scrambleConfig(),
 		colorMode: opts.ColorMode,
 	}
-	if len(h.Commits) > 0 {
+	// Pre-compute the per-commit churn / cumulative-files arrays
+	// for the footer sparklines. The streaming path populates these
+	// incrementally in applyBatch; this branch covers Run(History).
+	if n := len(h.Commits); n > 0 {
 		m.commitDwell = m.computeDwell()
+		m.linesAt = make([]int, n)
+		m.filesAt = make([]int, n)
+		walker := replay.NewTreeState(replay.DefaultHalfLife)
+		for i, c := range h.Commits {
+			lines := 0
+			for _, f := range c.Files {
+				lines += f.Added + f.Removed
+			}
+			m.linesAt[i] = lines
+			walker.Step(c)
+			m.filesAt[i] = walker.Counts().UniqueFiles
+		}
 	}
 	return m
 }

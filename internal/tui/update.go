@@ -118,7 +118,14 @@ func (m programModel) applyBatch(b gitlog.LoadBatch) (tea.Model, tea.Cmd) {
 			m.headTree = replay.NewTreeState(replay.DefaultHalfLife)
 		}
 		for i := range b.Commits {
-			m.headTree.Step(b.Commits[i])
+			c := b.Commits[i]
+			lines := 0
+			for _, f := range c.Files {
+				lines += f.Added + f.Removed
+			}
+			m.linesAt = append(m.linesAt, lines)
+			m.headTree.Step(c)
+			m.filesAt = append(m.filesAt, m.headTree.Counts().UniqueFiles)
 			absIdx := startIdx + i
 			if (absIdx+1)%snapshotInterval == 0 {
 				m.recordSnapshot(absIdx, m.headTree)

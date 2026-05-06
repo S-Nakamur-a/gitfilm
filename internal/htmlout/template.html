@@ -113,6 +113,22 @@
   .hud .del { color: var(--del); font-weight: 600; }
   .hud .files { color: var(--new); font-weight: 600; }
   .hud .span { color: var(--dim); }
+  /* Mini graphs: per-commit churn (bars) + cumulative file count
+     (area). Sit directly under the running-counters HUD so the
+     numeric and visual reads are stacked. SVGs scale to their flex
+     container; the viewBox is 200×18 so the bars/path render at
+     fractional sub-pixel widths on most layouts (browsers handle
+     the antialiasing). */
+  .hud-spark { display: flex; gap: 10px; align-items: center;
+    margin-top: 4px; font-size: 10px; flex-wrap: wrap; }
+  .hud-spark .label { color: var(--dim); width: 38px; flex: 0 0 38px;
+    text-transform: uppercase; letter-spacing: 0.6px; }
+  .hud-spark .label.churn { color: var(--new); }
+  .hud-spark .label.files { color: var(--feat); }
+  .hud-spark svg.spark { flex: 1 1 120px; min-width: 80px; max-width: 360px;
+    height: 18px; background: rgba(255,255,255,0.025);
+    border-radius: 2px; }
+  .hud-spark .caret { stroke: var(--fg); stroke-opacity: 0.85; }
 </style>
 </head>
 <body>
@@ -148,6 +164,12 @@
     <span class="del" id="hud-removed">-0</span>
     <span class="files" id="hud-files">0 files</span>
     <span class="span" id="hud-span"></span>
+  </div>
+  <div class="hud-spark" aria-hidden="true">
+    <span class="label churn">churn</span>
+    <svg id="spark-churn" class="spark" viewBox="0 0 200 18" preserveAspectRatio="none"></svg>
+    <span class="label files">files</span>
+    <svg id="spark-files" class="spark" viewBox="0 0 200 18" preserveAspectRatio="none"></svg>
   </div>
   <div class="controls">
     <button id="play">▶</button>
@@ -439,15 +461,12 @@ function runGitfilm(data) {
   // Prefix sums of added/removed across summaries so the HUD can read
   // cumulative totals up to idx in O(1). Built once at boot — costs
   // O(N) at startup, beats O(idx) on every redraw during scrubbing.
-  // cumFiles is null until first read; populated lazily because the
-  // unique-paths set requires per-frame snapshot data which is
-  // chunk-loaded.
-  const cumAdded = new Int32Array(commitCount + 1);
-  const cumRemoved = new Int32Array(commitCount + 1);
+  const totalAdded = new Int32Array(commitCount + 1);
+  const totalRemoved = new Int32Array(commitCount + 1);
   for (let i = 0; i < commitCount; i++) {
     const s = summaries[i] || {};
-    cumAdded[i + 1] = cumAdded[i] + (s.added | 0);
-    cumRemoved[i + 1] = cumRemoved[i] + (s.removed | 0);
+    totalAdded[i + 1] = totalAdded[i] + (s.added | 0);
+    totalRemoved[i + 1] = totalRemoved[i] + (s.removed | 0);
   }
 
   // Time bounds for time-based timeline placement. Computed once from
@@ -799,8 +818,8 @@ function runGitfilm(data) {
   // the snapshot's heat+ghost paths so we don't double-count
   // renames. Span uses the time bounds we already cached.
   function updateHUD() {
-    const a = cumAdded[idx + 1];
-    const r = cumRemoved[idx + 1];
+    const a = totalAdded[idx + 1];
+    const r = totalRemoved[idx + 1];
     document.getElementById('hud-added').textContent = '+' + humanCount(a);
     document.getElementById('hud-removed').textContent = '-' + humanCount(r);
     const snap = snapshotAt(idx);
@@ -815,6 +834,124 @@ function runGitfilm(data) {
     } else {
       span.textContent = '';
     }
+    updateSparkCaret();
+  }
+
+  // Mini-graph state. The bar / area geometry depends only on the
+  // summaries (eager) so we draw it once at boot; only the caret
+  // line moves as the user advances. Bin count matches the SVG
+  // viewBox width so each bin renders at 1 unit wide — sub-pixel
+  // antialiasing is handled by the browser.
+  const SPARK_BINS = 200;
+  const SPARK_H = 18;
+  // SVG namespace identifier required by createElementNS for the
+  // browser to interpret the new node as SVG. Per the XML
+  // Namespaces spec this is an identifier — browsers do NOT
+  // dereference it as a URL, so it does not violate the
+  // zero-egress invariant. Required as a literal string by spec.
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  function downsampleMax(values, w) {
+    const n = values.length;
+    if (w <= 0 || n === 0) return [];
+    if (w >= n) {
+      const out = new Array(n);
+      for (let i = 0; i < n; i++) out[i] = values[i];
+      return out;
+    }
+    const out = new Array(w);
+    for (let i = 0; i < w; i++) {
+      const lo = Math.floor(i * n / w);
+      let hi = Math.floor((i + 1) * n / w);
+      if (hi <= lo) hi = lo + 1;
+      if (hi > n) hi = n;
+      let m = values[lo];
+      for (let j = lo + 1; j < hi; j++) if (values[j] > m) m = values[j];
+      out[i] = m;
+    }
+    return out;
+  }
+  function caretBucket(i, n, w) {
+    if (n <= 0 || w <= 0 || i < 0) return -1;
+    if (i >= n) i = n - 1;
+    if (w >= n) return i;
+    const b = Math.floor(i * w / n);
+    return b >= w ? w - 1 : b;
+  }
+  function buildSparklines() {
+    const churnVals = new Array(commitCount);
+    const filesVals = new Array(commitCount);
+    for (let i = 0; i < commitCount; i++) {
+      const s = summaries[i] || {};
+      churnVals[i] = (s.added | 0) + (s.removed | 0);
+      filesVals[i] = s.total_files | 0;
+    }
+    const churnBins = downsampleMax(churnVals, SPARK_BINS);
+    const filesBins = downsampleMax(filesVals, SPARK_BINS);
+    const churnMax = churnBins.reduce((a, b) => a > b ? a : b, 0) || 1;
+    const filesMax = filesBins.reduce((a, b) => a > b ? a : b, 0) || 1;
+
+    // Churn: discrete bars whose height encodes per-bin peak churn.
+    const churnSvg = document.getElementById('spark-churn');
+    while (churnSvg.firstChild) churnSvg.removeChild(churnSvg.firstChild);
+    const barInset = 0.075; // tiny gap between bars (in viewBox units)
+    for (let i = 0; i < churnBins.length; i++) {
+      const v = churnBins[i];
+      if (v <= 0) continue;
+      const h = (v / churnMax) * (SPARK_H - 2);
+      const r = document.createElementNS(SVG_NS, 'rect');
+      r.setAttribute('x', String(i + barInset));
+      r.setAttribute('y', String(SPARK_H - h));
+      r.setAttribute('width', String(1 - 2 * barInset));
+      r.setAttribute('height', String(h));
+      r.setAttribute('fill', 'var(--new)');
+      churnSvg.appendChild(r);
+    }
+    appendCaret(churnSvg, 'spark-churn-caret');
+
+    // Files: filled area + line stroke encodes cumulative growth.
+    const filesSvg = document.getElementById('spark-files');
+    while (filesSvg.firstChild) filesSvg.removeChild(filesSvg.firstChild);
+    if (filesBins.length > 1) {
+      let line = '';
+      for (let i = 0; i < filesBins.length; i++) {
+        const x = i + 0.5;
+        const y = SPARK_H - (filesBins[i] / filesMax) * (SPARK_H - 2);
+        line += (i === 0 ? 'M' : 'L') + x.toFixed(2) + ',' + y.toFixed(2);
+      }
+      const lastX = (filesBins.length - 1 + 0.5).toFixed(2);
+      const area = document.createElementNS(SVG_NS, 'path');
+      area.setAttribute('d', line + ' L' + lastX + ',' + SPARK_H + ' L0.5,' + SPARK_H + ' Z');
+      area.setAttribute('fill', 'var(--feat)');
+      area.setAttribute('fill-opacity', '0.18');
+      filesSvg.appendChild(area);
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', line);
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', 'var(--feat)');
+      path.setAttribute('stroke-width', '1');
+      path.setAttribute('vector-effect', 'non-scaling-stroke');
+      filesSvg.appendChild(path);
+    }
+    appendCaret(filesSvg, 'spark-files-caret');
+  }
+  function appendCaret(svg, id) {
+    const c = document.createElementNS(SVG_NS, 'line');
+    c.setAttribute('id', id);
+    c.setAttribute('class', 'caret');
+    c.setAttribute('y1', '0');
+    c.setAttribute('y2', String(SPARK_H));
+    c.setAttribute('stroke-width', '1');
+    c.setAttribute('vector-effect', 'non-scaling-stroke');
+    svg.appendChild(c);
+  }
+  function updateSparkCaret() {
+    const b = caretBucket(idx, commitCount, SPARK_BINS);
+    if (b < 0) return;
+    const x = String(b + 0.5);
+    const c1 = document.getElementById('spark-churn-caret');
+    if (c1) { c1.setAttribute('x1', x); c1.setAttribute('x2', x); }
+    const c2 = document.getElementById('spark-files-caret');
+    if (c2) { c2.setAttribute('x1', x); c2.setAttribute('x2', x); }
   }
 
   function humanCount(n) {
@@ -896,6 +1033,7 @@ function runGitfilm(data) {
   });
 
   renderTimeline();
+  buildSparklines();
   updateCaret();
   render();
   // Hide the loading overlay only after the first paint, otherwise a
