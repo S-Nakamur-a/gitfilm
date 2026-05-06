@@ -119,11 +119,13 @@ func (m programModel) applyBatch(b gitlog.LoadBatch) (tea.Model, tea.Cmd) {
 		}
 		for i := range b.Commits {
 			c := b.Commits[i]
-			lines := 0
+			adds, rems := 0, 0
 			for _, f := range c.Files {
-				lines += f.Added + f.Removed
+				adds += f.Added
+				rems += f.Removed
 			}
-			m.linesAt = append(m.linesAt, lines)
+			m.addsAt = append(m.addsAt, adds)
+			m.removesAt = append(m.removesAt, rems)
 			m.headTree.Step(c)
 			m.filesAt = append(m.filesAt, m.headTree.Counts().UniqueFiles)
 			absIdx := startIdx + i

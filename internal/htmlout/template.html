@@ -121,22 +121,36 @@
   .hud .del { color: var(--del); font-weight: 600; }
   .hud .files { color: var(--new); font-weight: 600; }
   .hud .span { color: var(--dim); }
-  /* Mini graphs: per-commit churn (bars) + cumulative file count
-     (area). Sit directly under the running-counters HUD so the
-     numeric and visual reads are stacked. SVGs scale to their flex
-     container; the viewBox is 200×18 so the bars/path render at
-     fractional sub-pixel widths on most layouts (browsers handle
-     the antialiasing). */
+  /* Mini graphs: per-commit bipolar churn (adds up / removes down,
+     anchored at zero) + cumulative file count (area). Sit directly
+     under the running-counters HUD so the numeric and visual reads
+     are stacked. The churn viewBox is 200×36 (twice the file viewBox
+     height) so adds and removes each get the same vertical room as
+     the original single-direction strip. */
   .hud-spark { display: flex; gap: 10px; align-items: center;
     margin-top: 4px; font-size: 10px; flex-wrap: wrap; }
   .hud-spark .label { color: var(--dim); width: 38px; flex: 0 0 38px;
     text-transform: uppercase; letter-spacing: 0.6px; }
-  .hud-spark .label.churn { color: var(--new); }
+  .hud-spark .label.churn { color: var(--add); }
   .hud-spark .label.files { color: var(--feat); }
   .hud-spark svg.spark { flex: 1 1 120px; min-width: 80px; max-width: 360px;
-    height: 18px; background: rgba(255,255,255,0.025);
+    background: rgba(255,255,255,0.025);
     border-radius: 2px; }
+  .hud-spark svg#spark-churn { height: 30px; }
+  .hud-spark svg#spark-files { height: 18px; }
   .hud-spark .caret { stroke: var(--fg); stroke-opacity: 0.85; }
+  /* Bipolar churn fills. Adds use --add (green), removes use --del
+     (red). The zero baseline is a thin desaturated line so the eye
+     anchors on it without being distracted by it. */
+  .hud-spark .bar-add { fill: var(--add); }
+  .hud-spark .bar-rem { fill: var(--del); }
+  .hud-spark .zero-line { stroke: var(--dim); stroke-opacity: 0.4;
+    stroke-width: 1; vector-effect: non-scaling-stroke; }
+  /* Past/future split. Same hue, different opacity, so the overall
+     graph shape reads continuously while the saturated left half
+     clearly marks "already played". The clipPath rects get resized
+     in JS as the caret advances. */
+  .hud-spark .spark-future { opacity: 0.28; }
 </style>
 </head>
 <body>
@@ -174,10 +188,11 @@
     <span class="span" id="hud-span"></span>
   </div>
   <div class="hud-spark" aria-hidden="true">
-    <span class="label churn">churn</span>
-    <svg id="spark-churn" class="spark" viewBox="0 0 200 18" preserveAspectRatio="none"></svg>
+    <span class="label churn">±lines</span>
+    <svg id="spark-churn" class="spark" viewBox="0 0 200 36" preserveAspectRatio="none"></svg>
     <span class="label files">files</span>
     <svg id="spark-files" class="spark" viewBox="0 0 200 18" preserveAspectRatio="none"></svg>
+    <span class="label" title="±lines = per-commit added (above zero, green) and removed (below zero, red); top 5% clipped to keep generated-file commits from crushing the chart. files = cumulative unique-files count">?</span>
   </div>
   <div class="controls">
     <button id="play">▶</button>
@@ -853,7 +868,14 @@ function runGitfilm(data) {
   // viewBox width so each bin renders at 1 unit wide — sub-pixel
   // antialiasing is handled by the browser.
   const SPARK_BINS = 200;
-  const SPARK_H = 18;
+  const SPARK_H = 18;          // single-direction strip height (files)
+  const CHURN_H = 36;          // bipolar strip height (adds above, removes below)
+  const CHURN_ZERO = CHURN_H / 2;
+  // Mirror of the TUI outlierClipPercentile in view_spark.go: cap the
+  // bipolar Y axis at the 95th percentile of the combined adds+removes
+  // distribution so a single 50K-line generated-file commit doesn't
+  // crush every other bar to a sliver.
+  const CHURN_CLIP_PCT = 0.95;
   // SVG namespace identifier required by createElementNS for the
   // browser to interpret the new node as SVG. Per the XML
   // Namespaces spec this is an identifier — browsers do NOT
@@ -888,39 +910,69 @@ function runGitfilm(data) {
     return b >= w ? w - 1 : b;
   }
   function buildSparklines() {
-    const churnVals = new Array(commitCount);
+    const addVals = new Array(commitCount);
+    const remVals = new Array(commitCount);
     const filesVals = new Array(commitCount);
     for (let i = 0; i < commitCount; i++) {
       const s = summaries[i] || {};
-      churnVals[i] = (s.added | 0) + (s.removed | 0);
+      addVals[i] = s.added | 0;
+      remVals[i] = s.removed | 0;
       filesVals[i] = s.total_files | 0;
     }
-    const churnBins = downsampleMax(churnVals, SPARK_BINS);
+    const addBins = downsampleMax(addVals, SPARK_BINS);
+    const remBins = downsampleMax(remVals, SPARK_BINS);
     const filesBins = downsampleMax(filesVals, SPARK_BINS);
-    const churnMax = churnBins.reduce((a, b) => a > b ? a : b, 0) || 1;
+
+    // Symmetric clip: take the 95th percentile of the *combined*
+    // adds+removes distribution so both halves share one ceiling
+    // and a 1000-line add bar visually equals a 1000-line remove
+    // bar. The fallback to 1 keeps division by zero away when
+    // every commit is a no-op (e.g. merge commits with no files).
+    const churnClip = Math.max(1, percentile([...addVals, ...remVals], CHURN_CLIP_PCT));
     const filesMax = filesBins.reduce((a, b) => a > b ? a : b, 0) || 1;
 
-    // Churn: discrete bars whose height encodes per-bin peak churn.
-    const churnSvg = document.getElementById('spark-churn');
-    while (churnSvg.firstChild) churnSvg.removeChild(churnSvg.firstChild);
-    const barInset = 0.075; // tiny gap between bars (in viewBox units)
-    for (let i = 0; i < churnBins.length; i++) {
-      const v = churnBins[i];
-      if (v <= 0) continue;
-      const h = (v / churnMax) * (SPARK_H - 2);
-      const r = document.createElementNS(SVG_NS, 'rect');
-      r.setAttribute('x', String(i + barInset));
-      r.setAttribute('y', String(SPARK_H - h));
-      r.setAttribute('width', String(1 - 2 * barInset));
-      r.setAttribute('height', String(h));
-      r.setAttribute('fill', 'var(--new)');
-      churnSvg.appendChild(r);
-    }
-    appendCaret(churnSvg, 'spark-churn-caret');
+    // Bipolar churn: adds rise from the zero line (y=CHURN_ZERO)
+    // upward; removes drop from zero downward. Each half gets the
+    // same vertical room (CHURN_ZERO units = SPARK_H), so the chart
+    // is visually balanced even on a repo that does only adds.
+    buildSpark('spark-churn', 'cc', CHURN_H, (group) => {
+      const barInset = 0.075;
+      const halfH = CHURN_ZERO - 1;
+      // Zero baseline — drawn in both groups so it's visible whether
+      // the caret is at the start (all-future) or the end (all-past).
+      const zero = document.createElementNS(SVG_NS, 'line');
+      zero.setAttribute('x1', '0');
+      zero.setAttribute('x2', String(SPARK_BINS));
+      zero.setAttribute('y1', String(CHURN_ZERO));
+      zero.setAttribute('y2', String(CHURN_ZERO));
+      zero.setAttribute('class', 'zero-line');
+      group.appendChild(zero);
+      for (let i = 0; i < addBins.length; i++) {
+        const a = Math.min(addBins[i], churnClip);
+        if (a > 0) {
+          const h = (a / churnClip) * halfH;
+          const r = document.createElementNS(SVG_NS, 'rect');
+          r.setAttribute('x', String(i + barInset));
+          r.setAttribute('y', String(CHURN_ZERO - h));
+          r.setAttribute('width', String(1 - 2 * barInset));
+          r.setAttribute('height', String(h));
+          r.setAttribute('class', 'bar-add');
+          group.appendChild(r);
+        }
+        const rm = Math.min(remBins[i], churnClip);
+        if (rm > 0) {
+          const h = (rm / churnClip) * halfH;
+          const r = document.createElementNS(SVG_NS, 'rect');
+          r.setAttribute('x', String(i + barInset));
+          r.setAttribute('y', String(CHURN_ZERO));
+          r.setAttribute('width', String(1 - 2 * barInset));
+          r.setAttribute('height', String(h));
+          r.setAttribute('class', 'bar-rem');
+          group.appendChild(r);
+        }
+      }
+    });
 
-    // Files: filled area + line stroke encodes cumulative growth.
-    const filesSvg = document.getElementById('spark-files');
-    while (filesSvg.firstChild) filesSvg.removeChild(filesSvg.firstChild);
     if (filesBins.length > 1) {
       let line = '';
       for (let i = 0; i < filesBins.length; i++) {
@@ -929,27 +981,95 @@ function runGitfilm(data) {
         line += (i === 0 ? 'M' : 'L') + x.toFixed(2) + ',' + y.toFixed(2);
       }
       const lastX = (filesBins.length - 1 + 0.5).toFixed(2);
-      const area = document.createElementNS(SVG_NS, 'path');
-      area.setAttribute('d', line + ' L' + lastX + ',' + SPARK_H + ' L0.5,' + SPARK_H + ' Z');
-      area.setAttribute('fill', 'var(--feat)');
-      area.setAttribute('fill-opacity', '0.18');
-      filesSvg.appendChild(area);
-      const path = document.createElementNS(SVG_NS, 'path');
-      path.setAttribute('d', line);
-      path.setAttribute('fill', 'none');
-      path.setAttribute('stroke', 'var(--feat)');
-      path.setAttribute('stroke-width', '1');
-      path.setAttribute('vector-effect', 'non-scaling-stroke');
-      filesSvg.appendChild(path);
+      const areaD = line + ' L' + lastX + ',' + SPARK_H + ' L0.5,' + SPARK_H + ' Z';
+      buildSpark('spark-files', 'fc', SPARK_H, (group) => {
+        const area = document.createElementNS(SVG_NS, 'path');
+        area.setAttribute('d', areaD);
+        area.setAttribute('fill', 'var(--feat)');
+        area.setAttribute('fill-opacity', '0.18');
+        group.appendChild(area);
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('d', line);
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', 'var(--feat)');
+        path.setAttribute('stroke-width', '1');
+        path.setAttribute('vector-effect', 'non-scaling-stroke');
+        group.appendChild(path);
+      });
+    } else {
+      // No data: still emit the scaffolding so updateSparkCaret can
+      // resize the clip rects without null-checks.
+      buildSpark('spark-files', 'fc', SPARK_H, () => {});
     }
-    appendCaret(filesSvg, 'spark-files-caret');
   }
-  function appendCaret(svg, id) {
+  // percentile picks the value at p∈[0,1] in the sorted positive
+  // entries of values. Mirrors replay.PercentileMax in Go: zeros
+  // and negatives are dropped so an all-add or all-remove repo
+  // still gets a sensible ceiling. Returns 0 when nothing positive
+  // exists; callers should clamp to ≥1 to avoid division by zero.
+  function percentile(values, p) {
+    const pos = [];
+    for (const v of values) if (v > 0) pos.push(v);
+    if (pos.length === 0) return 0;
+    pos.sort((a, b) => a - b);
+    const idx = Math.min(pos.length - 1, Math.max(0, Math.round(p * (pos.length - 1))));
+    return pos[idx];
+  }
+  // buildSpark wires up <defs> with two clipPaths plus two <g>
+  // groups (past/future) that share the same content via a draw()
+  // callback. The clip rects start with the caret at bucket 0
+  // (entire strip = future); updateSparkCaret resizes them every
+  // frame the playhead moves. The svgH parameter is needed because
+  // the bipolar churn strip is twice as tall as the files strip.
+  function buildSpark(svgId, idPrefix, svgH, draw) {
+    const svg = document.getElementById(svgId);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const defs = document.createElementNS(SVG_NS, 'defs');
+    const cpPast = document.createElementNS(SVG_NS, 'clipPath');
+    cpPast.setAttribute('id', idPrefix + '-past-clip');
+    cpPast.setAttribute('clipPathUnits', 'userSpaceOnUse');
+    const rectPast = document.createElementNS(SVG_NS, 'rect');
+    rectPast.setAttribute('id', idPrefix + '-past-rect');
+    rectPast.setAttribute('x', '0');
+    rectPast.setAttribute('y', '0');
+    rectPast.setAttribute('width', '0');
+    rectPast.setAttribute('height', String(svgH));
+    cpPast.appendChild(rectPast);
+    defs.appendChild(cpPast);
+
+    const cpFuture = document.createElementNS(SVG_NS, 'clipPath');
+    cpFuture.setAttribute('id', idPrefix + '-future-clip');
+    cpFuture.setAttribute('clipPathUnits', 'userSpaceOnUse');
+    const rectFuture = document.createElementNS(SVG_NS, 'rect');
+    rectFuture.setAttribute('id', idPrefix + '-future-rect');
+    rectFuture.setAttribute('x', '0');
+    rectFuture.setAttribute('y', '0');
+    rectFuture.setAttribute('width', String(SPARK_BINS));
+    rectFuture.setAttribute('height', String(svgH));
+    cpFuture.appendChild(rectFuture);
+    defs.appendChild(cpFuture);
+    svg.appendChild(defs);
+
+    const gPast = document.createElementNS(SVG_NS, 'g');
+    gPast.setAttribute('clip-path', 'url(#' + idPrefix + '-past-clip)');
+    draw(gPast);
+    svg.appendChild(gPast);
+
+    const gFuture = document.createElementNS(SVG_NS, 'g');
+    gFuture.setAttribute('class', 'spark-future');
+    gFuture.setAttribute('clip-path', 'url(#' + idPrefix + '-future-clip)');
+    draw(gFuture);
+    svg.appendChild(gFuture);
+
+    appendCaret(svg, svgId + '-caret', svgH);
+  }
+  function appendCaret(svg, id, svgH) {
     const c = document.createElementNS(SVG_NS, 'line');
     c.setAttribute('id', id);
     c.setAttribute('class', 'caret');
     c.setAttribute('y1', '0');
-    c.setAttribute('y2', String(SPARK_H));
+    c.setAttribute('y2', String(svgH));
     c.setAttribute('stroke-width', '1');
     c.setAttribute('vector-effect', 'non-scaling-stroke');
     svg.appendChild(c);
@@ -957,11 +1077,27 @@ function runGitfilm(data) {
   function updateSparkCaret() {
     const b = caretBucket(idx, commitCount, SPARK_BINS);
     if (b < 0) return;
+    // Boundary at the *right* edge of the caret bucket so the bar
+    // containing the playhead is part of "past" (saturated). This
+    // matches the TUI, where the caret cell uses the bold accent
+    // and everything to its left is fully colored.
+    const boundary = Math.min(SPARK_BINS, b + 1);
+    const futureWidth = Math.max(0, SPARK_BINS - boundary);
     const x = String(b + 0.5);
-    const c1 = document.getElementById('spark-churn-caret');
-    if (c1) { c1.setAttribute('x1', x); c1.setAttribute('x2', x); }
-    const c2 = document.getElementById('spark-files-caret');
-    if (c2) { c2.setAttribute('x1', x); c2.setAttribute('x2', x); }
+    const cc1 = document.getElementById('spark-churn-caret');
+    if (cc1) { cc1.setAttribute('x1', x); cc1.setAttribute('x2', x); }
+    const cc2 = document.getElementById('spark-files-caret');
+    if (cc2) { cc2.setAttribute('x1', x); cc2.setAttribute('x2', x); }
+    setRect('cc-past-rect', 0, boundary);
+    setRect('cc-future-rect', boundary, futureWidth);
+    setRect('fc-past-rect', 0, boundary);
+    setRect('fc-future-rect', boundary, futureWidth);
+  }
+  function setRect(id, x, width) {
+    const r = document.getElementById(id);
+    if (!r) return;
+    r.setAttribute('x', String(x));
+    r.setAttribute('width', String(width));
   }
 
   function humanCount(n) {

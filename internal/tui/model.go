@@ -29,13 +29,17 @@ type programModel struct {
 	// of the replay when navigating backwards.
 	snapshots []*replay.TreeState
 
-	// linesAt[i] is the per-commit churn (added+removed) for
-	// commits[i]; filesAt[i] is the cumulative unique-files count
-	// AFTER stepping commits[i]. Both grow as batches arrive so
-	// the footer mini-graphs can render whatever is loaded so far.
-	// Indexed parallel to history.Commits.
-	linesAt []int
-	filesAt []int
+	// addsAt[i] / removesAt[i] are the per-commit added / removed
+	// line counts for commits[i]; filesAt[i] is the cumulative
+	// unique-files count AFTER stepping commits[i]. Adds and removes
+	// are kept separate (rather than summed into one "churn" number)
+	// so the footer's bipolar churn chart can show "this commit was
+	// mostly an add" vs "this commit was mostly a cleanup". All three
+	// grow as batches arrive so the mini-graphs can render whatever
+	// is loaded so far. Indexed parallel to history.Commits.
+	addsAt    []int
+	removesAt []int
+	filesAt   []int
 
 	// Streaming state. loadCh is nil when the program was given a
 	// pre-built history; when non-nil, the model pulls commits in
@@ -161,15 +165,18 @@ func newModel(h model.History, opts Options) programModel {
 	// incrementally in applyBatch; this branch covers Run(History).
 	if n := len(h.Commits); n > 0 {
 		m.commitDwell = m.computeDwell()
-		m.linesAt = make([]int, n)
+		m.addsAt = make([]int, n)
+		m.removesAt = make([]int, n)
 		m.filesAt = make([]int, n)
 		walker := replay.NewTreeState(replay.DefaultHalfLife)
 		for i, c := range h.Commits {
-			lines := 0
+			adds, rems := 0, 0
 			for _, f := range c.Files {
-				lines += f.Added + f.Removed
+				adds += f.Added
+				rems += f.Removed
 			}
-			m.linesAt[i] = lines
+			m.addsAt[i] = adds
+			m.removesAt[i] = rems
 			walker.Step(c)
 			m.filesAt[i] = walker.Counts().UniqueFiles
 		}
