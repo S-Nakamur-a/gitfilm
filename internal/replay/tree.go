@@ -52,6 +52,14 @@ type TreeState struct {
 	added    map[string]bool // freshly added in the current frame (cleared by next Step)
 	statuses map[string]model.ChangeStatus
 
+	// loc is the cumulative net line count per file (added − removed
+	// across all commits applied so far). Heat decays so it can't be
+	// used as a "size" measure for the treemap; loc is monotonic-ish
+	// (only changes from explicit diffs) and represents "how big is
+	// this file right now". Cleared on StatusDeleted; transferred on
+	// StatusRenamed.
+	loc map[string]int
+
 	// Cumulative totals across all commits applied so far. These are
 	// monotonic (Step only adds) so the running-counters HUD can
 	// read them in O(1) without rewalking history. Snapshots/Clones
@@ -74,6 +82,7 @@ func (t *TreeState) Clone() *TreeState {
 		deleted:    make(map[string]bool, len(t.deleted)),
 		added:      make(map[string]bool, len(t.added)),
 		statuses:   make(map[string]model.ChangeStatus, len(t.statuses)),
+		loc:        make(map[string]int, len(t.loc)),
 		cumAdded:   t.cumAdded,
 		cumRemoved: t.cumRemoved,
 		cumCommits: t.cumCommits,
@@ -95,6 +104,9 @@ func (t *TreeState) Clone() *TreeState {
 	for k, v := range t.statuses {
 		c.statuses[k] = v
 	}
+	for k, v := range t.loc {
+		c.loc[k] = v
+	}
 	return c
 }
 
@@ -105,6 +117,7 @@ func NewTreeState(halfLife float64) *TreeState {
 		deleted:  make(map[string]bool),
 		added:    make(map[string]bool),
 		statuses: make(map[string]model.ChangeStatus),
+		loc:      make(map[string]int),
 		halfLife: halfLife,
 	}
 	if halfLife > 0 {
@@ -130,25 +143,66 @@ func (t *TreeState) Step(c model.Commit) {
 		if f.Status == model.StatusRenamed && f.OldPath != "" && f.OldPath != f.Path {
 			t.heat[f.Path] += t.heat[f.OldPath]
 			t.touches[f.Path] += t.touches[f.OldPath]
+			t.loc[f.Path] += t.loc[f.OldPath]
 			delete(t.heat, f.OldPath)
 			delete(t.touches, f.OldPath)
 			delete(t.statuses, f.OldPath)
+			delete(t.loc, f.OldPath)
 		}
 		t.heat[f.Path] += float64(f.Added + f.Removed)
 		t.touches[f.Path]++
 		t.statuses[f.Path] = f.Status
 		t.cumAdded += f.Added
 		t.cumRemoved += f.Removed
+		// Net LOC for this file. Floor at 0 because git diffs don't
+		// always reach absolute LOC=0 on heavy refactors and a
+		// negative value would skew the treemap weights.
+		t.loc[f.Path] += f.Added - f.Removed
+		if t.loc[f.Path] < 0 {
+			t.loc[f.Path] = 0
+		}
 		switch f.Status {
 		case model.StatusAdded:
 			t.added[f.Path] = true
 			delete(t.deleted, f.Path)
 		case model.StatusDeleted:
 			t.deleted[f.Path] = true
+			delete(t.loc, f.Path)
 		default:
 			delete(t.deleted, f.Path)
 		}
 	}
+}
+
+// LOCSnapshot returns a copy of the per-file net line counts. Used
+// by the treemap renderer as the size weight for each rectangle.
+// Returns a fresh map; callers can mutate freely without affecting
+// the underlying state.
+func (t *TreeState) LOCSnapshot() map[string]int {
+	out := make(map[string]int, len(t.loc))
+	for k, v := range t.loc {
+		out[k] = v
+	}
+	return out
+}
+
+// HeatOf returns the post-decay heat for one path. Renderers use it
+// to color a single cell without materializing the full snapshot.
+// O(1).
+func (t *TreeState) HeatOf(path string) float64 { return t.heat[path] }
+
+// MaxHeat returns the largest current heat across all paths, used
+// by callers to normalize heat into a 0..1 ratio. Returns 0 when
+// the state is empty (callers should avoid divide-by-zero).
+// O(N) — call sparingly (once per frame, not per cell).
+func (t *TreeState) MaxHeat() float64 {
+	max := 0.0
+	for _, v := range t.heat {
+		if v > max {
+			max = v
+		}
+	}
+	return max
 }
 
 // Counts is a small read-only snapshot of TreeState's cumulative

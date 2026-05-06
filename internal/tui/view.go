@@ -60,8 +60,10 @@ func (m programModel) renderBody(cur model.Commit, leftW, rightW, bodyH int) str
 	innerLeft := leftW - innerPad
 	innerRight := rightW - innerPad
 
+	innerLeftH := bodyH - 2
+	leftBody := m.renderLeftPane(innerLeft, innerLeftH)
 	left := stylePane.Width(leftW).MaxWidth(leftW).Height(bodyH).
-		Render(clipPane(m.renderTree(innerLeft), innerLeft, bodyH-2))
+		Render(clipPane(leftBody, innerLeft, innerLeftH))
 	right := stylePane.Width(rightW).MaxWidth(rightW).Height(bodyH).
 		Render(clipPane(m.renderRight(cur, innerRight, bodyH-2), innerRight, bodyH-2))
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
@@ -214,8 +216,13 @@ func footerLegend(againstName string) string {
 
 func (m programModel) footerHint() string {
 	speedTag := styleNew.Render(fmt.Sprintf("%.2gx", m.playSpeed))
+	viewTag := "tree"
+	if m.viewMode == ViewModeTreemap {
+		viewTag = "treemap"
+	}
 	hint := styleDim.Render("space: play/pause   ←/→: step   shift+←/→: ±10   +/-: speed (") +
-		speedTag + styleDim.Render(", 0:reset)   g/G: ends   q: quit")
+		speedTag + styleDim.Render(", 0:reset)   g/G: ends   t: view (") +
+		styleNew.Render(viewTag) + styleDim.Render(")   q: quit")
 	if m.loadErr != nil {
 		return styleDel.Render("load error: "+m.loadErr.Error()) + "  " + hint
 	}

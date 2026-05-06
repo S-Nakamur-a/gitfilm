@@ -58,7 +58,29 @@ type programModel struct {
 	// colorMode selects the timeline density encoding (see
 	// ColorMode docstring above).
 	colorMode ColorMode
+
+	// viewMode selects what the left pane shows. Toggled by the
+	// 't' key. Defaults to ViewModeTree (filesystem-style list);
+	// ViewModeTreemap renders a squarified treemap weighted by
+	// per-file LOC and shaded by current heat.
+	viewMode ViewMode
 }
+
+// ViewMode selects the left-pane visualization.
+//
+//   - ViewModeTree (default): filesystem-style indented list, one
+//     line per file, color = current heat tier. Best when the user
+//     wants to read filenames and follow specific files.
+//   - ViewModeTreemap: a squarified treemap weighted by per-file
+//     LOC, colored by heat. Files-as-rectangles makes the
+//     codebase's *shape* visible and turns the left pane into a
+//     "subject" the camera can stay on across cuts.
+type ViewMode int
+
+const (
+	ViewModeTree ViewMode = iota
+	ViewModeTreemap
+)
 
 // Options carries optional behavioural toggles for the TUI entry
 // points. Zero value preserves existing behaviour.

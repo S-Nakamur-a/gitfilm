@@ -72,6 +72,14 @@ func (m programModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.bumpPlaySpeed(-1)
 	case "0":
 		m.playSpeed = 1.0
+	case "t":
+		// Toggle left-pane view: tree ↔ treemap. Pure render-side
+		// switch — does not affect playback or state.
+		if m.viewMode == ViewModeTree {
+			m.viewMode = ViewModeTreemap
+		} else {
+			m.viewMode = ViewModeTree
+		}
 	}
 	return m, nil
 }
