@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/S-Nakamur-a/gitfilm/internal/model"
 	"github.com/S-Nakamur-a/gitfilm/internal/replay"
@@ -15,14 +16,20 @@ import (
 // summaries.
 func (m programModel) renderRight(c model.Commit, width, height int) string {
 	var sb strings.Builder
-	writeCommitCard(&sb, c, width)
+	gap := replay.GapBefore(m.history.Commits, m.idx)
+	bannerH := 0
+	if replay.ClassifyGap(gap) == replay.GapTierBanner {
+		writeGapBanner(&sb, gap, width)
+		bannerH = 2 // banner row + trailing blank
+	}
+	writeCommitCard(&sb, c, gap, width)
 
 	if len(c.Files) == 0 {
 		sb.WriteString(styleDim.Render("(no file changes in this commit)"))
 		return sb.String()
 	}
 
-	expandable, maxDiffLines := cardSlots(height, len(c.Files))
+	expandable, maxDiffLines := cardSlots(height-bannerH, len(c.Files))
 	units := int(m.effectiveElapsed().Seconds() * replay.UnitsPerSecond)
 	sep := styleDim.Render(strings.Repeat("─", width)) + "\n"
 
@@ -45,17 +52,47 @@ func (m programModel) renderRight(c model.Commit, width, height int) string {
 	return sb.String()
 }
 
+// writeGapBanner draws a centered "— 14 days later —" banner above
+// the commit subject when the wall-clock gap from the previous
+// commit reaches GapTierBanner. The bar is one row tall; it
+// announces a scene break the way a film would cut to a "two weeks
+// later" title card.
+func writeGapBanner(sb *strings.Builder, gap time.Duration, width int) {
+	label := replay.GapLabel(gap)
+	if label == "" {
+		return
+	}
+	core := "— " + label + " —"
+	pad := width - len([]rune(core))
+	if pad < 0 {
+		pad = 0
+	}
+	left := pad / 2
+	right := pad - left
+	sb.WriteString(styleDim.Render(strings.Repeat("─", left)) +
+		styleNew.Render(" "+core+" ") +
+		styleDim.Render(strings.Repeat("─", right)))
+	sb.WriteString("\n\n")
+}
+
 // writeCommitCard appends the subject + meta + body lines that
 // open the right pane. Uses the same height budget allocation
 // (commitCardRows) as cardSlots assumes.
-func writeCommitCard(sb *strings.Builder, c model.Commit, width int) {
+//
+// `gap` is rendered as an inline "5 days later" hint on the meta
+// line for sub-week gaps; banner-tier gaps are drawn separately by
+// the caller above the subject so they read as a scene break.
+func writeCommitCard(sb *strings.Builder, c model.Commit, gap time.Duration, width int) {
 	sb.WriteString(styleSubject.Render(truncate(c.Subject, width)))
 	sb.WriteByte('\n')
-	sb.WriteString(styleDim.Render(fmt.Sprintf("%s · %s · %s · %s",
-		c.AuthorName,
-		c.When.Format("2006-01-02 15:04"),
-		tagLabel(c.Tag),
-		c.ShortHash)))
+
+	meta := authorChip(c.AuthorName) + styleDim.Render(
+		" · "+c.When.Format("2006-01-02 15:04")+" · ") +
+		tagLabel(c.Tag) + styleDim.Render(" · "+c.ShortHash)
+	if label := replay.GapLabel(gap); label != "" && replay.ClassifyGap(gap) == replay.GapTierHint {
+		meta += "  " + styleNew.Render("⏳ "+label)
+	}
+	sb.WriteString(meta)
 	sb.WriteByte('\n')
 	if body := firstNonEmptyLine(c.Body); body != "" {
 		sb.WriteString(styleDim.Render(truncate(body, width)))

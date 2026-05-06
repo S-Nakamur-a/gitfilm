@@ -95,6 +95,24 @@
   .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
   .badge.feat { background: rgba(210,168,255,.15); color: var(--feat); }
   .badge.against { background: rgba(121,192,255,.15); color: var(--against); }
+  /* Author chip: per-author stable hue from the Go palette. The
+     background is the same hue at low alpha so the chip reads as a
+     character tag, distinct from feat/against tag chips. */
+  .author-chip { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 12px; font-weight: 600; }
+  /* Gap-banner styles. Hint: inline dim subtitle. Banner: a full-
+     width "scene break" rule above the subject. */
+  .gap-hint { color: var(--new); margin-left: 8px; font-size: 11px; }
+  .gap-banner { display: flex; align-items: center; gap: 8px; color: var(--new);
+    margin-bottom: 8px; font-size: 12px; letter-spacing: 0.5px; text-transform: uppercase; }
+  .gap-banner::before, .gap-banner::after { content: ''; flex: 1; height: 1px;
+    background: linear-gradient(to right, transparent, var(--new), transparent); opacity: 0.55; }
+  /* Running-counters HUD between the timeline and the controls. */
+  .hud { display: flex; gap: 14px; align-items: baseline; color: var(--dim);
+    font-size: 11px; margin-top: 6px; flex-wrap: wrap; }
+  .hud .add { color: var(--add); font-weight: 600; }
+  .hud .del { color: var(--del); font-weight: 600; }
+  .hud .files { color: var(--new); font-weight: 600; }
+  .hud .span { color: var(--dim); }
 </style>
 </head>
 <body>
@@ -110,6 +128,7 @@
 <main>
   <section class="panel tree" id="tree-panel"></section>
   <section class="panel right">
+    <div class="gap-banner" id="gap-banner" style="display:none"><span id="gap-banner-text"></span></div>
     <div class="commit-card">
       <h2 class="commit-subject" id="commit-subject"></h2>
       <div class="commit-author" id="commit-author"></div>
@@ -123,6 +142,12 @@
   <div class="timeline-wrap">
     <div class="timeline" id="timeline"></div>
     <div class="timeline-caret" id="caret"></div>
+  </div>
+  <div class="hud" id="hud" aria-live="polite">
+    <span class="add" id="hud-added">+0</span>
+    <span class="del" id="hud-removed">-0</span>
+    <span class="files" id="hud-files">0 files</span>
+    <span class="span" id="hud-span"></span>
   </div>
   <div class="controls">
     <button id="play">▶</button>
@@ -411,6 +436,20 @@ function runGitfilm(data) {
     walk(root, 0);
   }
 
+  // Prefix sums of added/removed across summaries so the HUD can read
+  // cumulative totals up to idx in O(1). Built once at boot — costs
+  // O(N) at startup, beats O(idx) on every redraw during scrubbing.
+  // cumFiles is null until first read; populated lazily because the
+  // unique-paths set requires per-frame snapshot data which is
+  // chunk-loaded.
+  const cumAdded = new Int32Array(commitCount + 1);
+  const cumRemoved = new Int32Array(commitCount + 1);
+  for (let i = 0; i < commitCount; i++) {
+    const s = summaries[i] || {};
+    cumAdded[i + 1] = cumAdded[i] + (s.added | 0);
+    cumRemoved[i + 1] = cumRemoved[i] + (s.removed | 0);
+  }
+
   // Time bounds for time-based timeline placement. Computed once from
   // summaries; degenerate histories (single instant) fall back to even
   // spacing via the timelineFrac() guards below.
@@ -582,9 +621,63 @@ function runGitfilm(data) {
     const rel = relativeAge(c.when_unix);
     const datePart = c.when || '';
     const dateLabel = rel ? datePart + ' (' + rel + ')' : datePart;
-    author.appendChild(document.createTextNode((c.author_name || '') + ' · ' + dateLabel + ' · '));
+    // Author chip is colored by the per-author hue computed in Go.
+    // Background uses the same hex at low alpha so the chip reads as
+    // a tag without dominating the metadata line.
+    const chip = el('span', { class: 'author-chip' }, c.author_name || '');
+    if (c.author_color) {
+      chip.style.color = c.author_color;
+      chip.style.background = hexToRGBA(c.author_color, 0.15);
+    }
+    author.appendChild(chip);
+    author.appendChild(document.createTextNode(' · ' + dateLabel + ' · '));
     author.appendChild(el('span', { class: 'badge ' + c.tag }, c.tag));
     author.appendChild(document.createTextNode(' · ' + short));
+    // Sub-week gap → inline "5 days later" hint. Banner-tier gaps
+    // are rendered separately in the gap-banner DOM block above.
+    if (c.gap_tier === 'hint' && c.gap_ms > 0) {
+      const days = Math.round(c.gap_ms / (1000 * 60 * 60 * 24));
+      author.appendChild(el('span', { class: 'gap-hint' },
+        '⏳ ' + days + ' day' + (days === 1 ? '' : 's') + ' later'));
+    }
+    // Banner block toggles based on tier.
+    const banner = document.getElementById('gap-banner');
+    const bText = document.getElementById('gap-banner-text');
+    if (c.gap_tier === 'banner' && c.gap_ms > 0) {
+      bText.textContent = humanGapLabel(c.gap_ms);
+      banner.style.display = 'flex';
+    } else {
+      banner.style.display = 'none';
+    }
+  }
+
+  // hexToRGBA turns "#rrggbb" into an rgba(...) string for the
+  // author-chip background. Falls back to the input color on parse
+  // failure so a bad palette entry doesn't blow up the renderer.
+  function hexToRGBA(hex, alpha) {
+    if (!hex || hex.length !== 7 || hex[0] !== '#') return hex;
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return hex;
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+  }
+
+  // humanGapLabel mirrors Go's replay.GapLabel: pick the largest
+  // unit that yields >= 1, single decimal removed.
+  function humanGapLabel(gapMs) {
+    const days = Math.floor(gapMs / (1000 * 60 * 60 * 24));
+    if (days < 7) return days + ' day' + (days === 1 ? '' : 's') + ' later';
+    if (days < 30) {
+      const w = Math.floor(days / 7);
+      return w + ' week' + (w === 1 ? '' : 's') + ' later';
+    }
+    if (days < 365) {
+      const m = Math.floor(days / 30);
+      return m + ' month' + (m === 1 ? '' : 's') + ' later';
+    }
+    const y = Math.floor(days / 365);
+    return y + ' year' + (y === 1 ? '' : 's') + ' later';
   }
 
   function renderFileCard(f, anim) {
@@ -689,6 +782,7 @@ function runGitfilm(data) {
       document.getElementById('scrubber').value = String(idx);
       renderTree(snapshotAt(idx));
       updateCaret();
+      updateHUD();
       lastIdxRendered = idx;
       lastRightSig = '';
     }
@@ -698,6 +792,42 @@ function runGitfilm(data) {
       renderRight(c, anims);
       lastRightSig = sig;
     }
+  }
+
+  // updateHUD writes the running-counters line. Cumulative
+  // adds/removes come from the prefix sums; unique-files comes from
+  // the snapshot's heat+ghost paths so we don't double-count
+  // renames. Span uses the time bounds we already cached.
+  function updateHUD() {
+    const a = cumAdded[idx + 1];
+    const r = cumRemoved[idx + 1];
+    document.getElementById('hud-added').textContent = '+' + humanCount(a);
+    document.getElementById('hud-removed').textContent = '-' + humanCount(r);
+    const snap = snapshotAt(idx);
+    const uniq = (snap.heat ? snap.heat.size : 0) + (snap.ghosts ? snap.ghosts.size : 0);
+    document.getElementById('hud-files').textContent = uniq + ' file' + (uniq === 1 ? '' : 's');
+    const s0 = summaries[0] || {};
+    const sc = summaries[idx] || {};
+    const span = document.getElementById('hud-span');
+    if (s0.when_unix && sc.when_unix) {
+      const days = Math.max(0, Math.floor((sc.when_unix - s0.when_unix) / 86400));
+      span.textContent = (s0.when || '') + ' → ' + (sc.when || '') + ' · ' + humanSpanDays(days);
+    } else {
+      span.textContent = '';
+    }
+  }
+
+  function humanCount(n) {
+    if (n < 1000) return String(n);
+    if (n < 1_000_000) return (n / 1000).toFixed(1) + 'K';
+    return (n / 1_000_000).toFixed(1) + 'M';
+  }
+
+  function humanSpanDays(days) {
+    if (days < 1) return 'today';
+    if (days < 30) return days + 'd span';
+    if (days < 365) return Math.floor(days / 30) + 'mo span';
+    return (days / 365).toFixed(1) + 'y span';
   }
 
   function step(dt) {

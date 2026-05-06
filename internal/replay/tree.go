@@ -52,6 +52,14 @@ type TreeState struct {
 	added    map[string]bool // freshly added in the current frame (cleared by next Step)
 	statuses map[string]model.ChangeStatus
 
+	// Cumulative totals across all commits applied so far. These are
+	// monotonic (Step only adds) so the running-counters HUD can
+	// read them in O(1) without rewalking history. Snapshots/Clones
+	// preserve them so backward navigation lands on the right total.
+	cumAdded   int
+	cumRemoved int
+	cumCommits int
+
 	halfLife float64
 	decay    float64
 }
@@ -61,13 +69,16 @@ type TreeState struct {
 // replay history from the very beginning each time.
 func (t *TreeState) Clone() *TreeState {
 	c := &TreeState{
-		heat:     make(map[string]float64, len(t.heat)),
-		touches:  make(map[string]int, len(t.touches)),
-		deleted:  make(map[string]bool, len(t.deleted)),
-		added:    make(map[string]bool, len(t.added)),
-		statuses: make(map[string]model.ChangeStatus, len(t.statuses)),
-		halfLife: t.halfLife,
-		decay:    t.decay,
+		heat:       make(map[string]float64, len(t.heat)),
+		touches:    make(map[string]int, len(t.touches)),
+		deleted:    make(map[string]bool, len(t.deleted)),
+		added:      make(map[string]bool, len(t.added)),
+		statuses:   make(map[string]model.ChangeStatus, len(t.statuses)),
+		cumAdded:   t.cumAdded,
+		cumRemoved: t.cumRemoved,
+		cumCommits: t.cumCommits,
+		halfLife:   t.halfLife,
+		decay:      t.decay,
 	}
 	for k, v := range t.heat {
 		c.heat[k] = v
@@ -113,6 +124,7 @@ func (t *TreeState) Step(c model.Commit) {
 	}
 	// freshly-added flags reset every frame
 	t.added = make(map[string]bool)
+	t.cumCommits++
 
 	for _, f := range c.Files {
 		if f.Status == model.StatusRenamed && f.OldPath != "" && f.OldPath != f.Path {
@@ -125,6 +137,8 @@ func (t *TreeState) Step(c model.Commit) {
 		t.heat[f.Path] += float64(f.Added + f.Removed)
 		t.touches[f.Path]++
 		t.statuses[f.Path] = f.Status
+		t.cumAdded += f.Added
+		t.cumRemoved += f.Removed
 		switch f.Status {
 		case model.StatusAdded:
 			t.added[f.Path] = true
@@ -134,6 +148,27 @@ func (t *TreeState) Step(c model.Commit) {
 		default:
 			delete(t.deleted, f.Path)
 		}
+	}
+}
+
+// Counts is a small read-only snapshot of TreeState's cumulative
+// totals. Renderers use it for "running counters" HUDs without
+// reaching into private fields.
+type Counts struct {
+	Added       int // sum of FileChange.Added across all stepped commits
+	Removed     int // sum of FileChange.Removed
+	UniqueFiles int // distinct paths touched (post-rename consolidation)
+	Commits     int // commits stepped
+}
+
+// Counts returns the cumulative totals up to the most recent Step.
+// O(1); does not allocate.
+func (t *TreeState) Counts() Counts {
+	return Counts{
+		Added:       t.cumAdded,
+		Removed:     t.cumRemoved,
+		UniqueFiles: len(t.touches),
+		Commits:     t.cumCommits,
 	}
 }
 

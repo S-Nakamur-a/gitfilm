@@ -38,7 +38,11 @@ const (
 // estimate up front. Off-by-one or two is fine — it only affects
 // how many cards we count toward dwell sizing, and the readTail
 // gives us a margin of error anyway.
-const approxChromeRows = 9
+//
+// Breakdown: header(1) + subject(1) + pane border(2) + footer
+// rows. Footer = commit-progress(1) + timeline cells(1) +
+// caret(1) + HUD(1) + legend(1) + hint(1) = 6.
+const approxChromeRows = 10
 
 // Pacing knobs that don't fit cleanly inside replay (which is
 // renderer-agnostic). frameTickMS is how often Update fires; finer

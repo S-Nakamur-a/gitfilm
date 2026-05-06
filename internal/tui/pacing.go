@@ -88,6 +88,12 @@ func (m programModel) computeDwell() time.Duration {
 	if d > replay.MaxCommitMS {
 		d = replay.MaxCommitMS
 	}
+	// Scene-break extra dwell is added AFTER MaxCommitMS clamping so a
+	// "14 days later" banner gets its full breathing room even on a
+	// commit whose typing dwell already saturated the cap. Without this,
+	// the banner would flash and disappear in the same time as a normal
+	// large commit and lose its cinematic punch.
+	d += replay.BannerExtraDwell(replay.GapBefore(m.history.Commits, m.idx))
 	return d
 }
 

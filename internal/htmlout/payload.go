@@ -42,16 +42,26 @@ type metaJSON struct {
 // commitSummary is the lightweight per-commit record present in
 // meta. Roughly 150–250 bytes JSON-encoded, so 7.9k commits
 // ≈ 1–2 MB.
+//
+// AuthorColor / GapMS / GapTier / Added / Removed are added so the
+// HTML player can render the cinematic chrome (per-author tint,
+// "N days later" cards, running counters) without a second
+// payload pass.
 type commitSummary struct {
-	Hash       string `json:"hash"`
-	Short      string `json:"short"`
-	AuthorName string `json:"author_name"`
-	When       string `json:"when"`
-	WhenUnix   int64  `json:"when_unix"`
-	Subject    string `json:"subject"`
-	Tag        string `json:"tag"`
-	DwellMS    int64  `json:"dwell_ms"`
-	MaxBudget  int    `json:"max_budget"`
+	Hash        string `json:"hash"`
+	Short       string `json:"short"`
+	AuthorName  string `json:"author_name"`
+	AuthorColor string `json:"author_color"`
+	When        string `json:"when"`
+	WhenUnix    int64  `json:"when_unix"`
+	Subject     string `json:"subject"`
+	Tag         string `json:"tag"`
+	DwellMS     int64  `json:"dwell_ms"`
+	MaxBudget   int    `json:"max_budget"`
+	Added       int    `json:"added"`
+	Removed     int    `json:"removed"`
+	GapMS       int64  `json:"gap_ms"`   // wall-clock ms since previous commit
+	GapTier     string `json:"gap_tier"` // "" / "hint" / "banner"
 }
 
 // commitDetail is the heavyweight per-commit record. Lives inside
@@ -158,6 +168,7 @@ func buildPayloadTimed(h model.History, ropts RenderOptions, diag io.Writer) (me
 		ts = time.Now()
 		snap := buildSnapshot(state.HeatSnapshotWith(opts))
 		stats.snapshot += time.Since(ts)
+		gap := replay.GapBefore(h.Commits, i)
 
 		if diag != nil && (i+1)%progressEvery == 0 {
 			fmt.Fprintf(diag,
@@ -174,7 +185,7 @@ func buildPayloadTimed(h model.History, ropts RenderOptions, diag io.Writer) (me
 		}
 
 		ts = time.Now()
-		meta.Summaries = append(meta.Summaries, commitSummaryFor(c))
+		meta.Summaries = append(meta.Summaries, commitSummaryFor(c, gap))
 		curChunk = append(curChunk, commitDetailFor(c, snap))
 		if len(curChunk) >= detailChunkSize {
 			chunks = append(chunks, curChunk)
@@ -217,17 +228,39 @@ func newMeta(h model.History, opts replay.SnapshotOpts, ropts RenderOptions) met
 	}
 }
 
-func commitSummaryFor(c model.Commit) commitSummary {
+func commitSummaryFor(c model.Commit, gap time.Duration) commitSummary {
+	added, removed := 0, 0
+	for _, f := range c.Files {
+		added += f.Added
+		removed += f.Removed
+	}
+	dwell := replay.DwellForWith(c, replay.FirstHunkProfile) + replay.BannerExtraDwell(gap)
 	return commitSummary{
-		Hash:       c.Hash,
-		Short:      c.ShortHash,
-		AuthorName: c.AuthorName,
-		When:       c.When.Format("2006-01-02 15:04"),
-		WhenUnix:   c.When.Unix(),
-		Subject:    c.Subject,
-		Tag:        tagJSON(c.Tag),
-		MaxBudget:  replay.CommitMaxBudgetWith(c, replay.FirstHunkProfile),
-		DwellMS:    replay.DwellForWith(c, replay.FirstHunkProfile).Milliseconds(),
+		Hash:        c.Hash,
+		Short:       c.ShortHash,
+		AuthorName:  c.AuthorName,
+		AuthorColor: replay.AuthorColor(c.AuthorName),
+		When:        c.When.Format("2006-01-02 15:04"),
+		WhenUnix:    c.When.Unix(),
+		Subject:     c.Subject,
+		Tag:         tagJSON(c.Tag),
+		MaxBudget:   replay.CommitMaxBudgetWith(c, replay.FirstHunkProfile),
+		DwellMS:     dwell.Milliseconds(),
+		Added:       added,
+		Removed:     removed,
+		GapMS:       gap.Milliseconds(),
+		GapTier:     gapTierJSON(replay.ClassifyGap(gap)),
+	}
+}
+
+func gapTierJSON(t replay.GapTier) string {
+	switch t {
+	case replay.GapTierHint:
+		return "hint"
+	case replay.GapTierBanner:
+		return "banner"
+	default:
+		return ""
 	}
 }
 

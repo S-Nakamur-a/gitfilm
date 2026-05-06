@@ -2,6 +2,7 @@ package tui
 
 import (
 	"github.com/S-Nakamur-a/gitfilm/internal/model"
+	"github.com/S-Nakamur-a/gitfilm/internal/replay"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -55,6 +56,23 @@ func tagLabel(t model.BranchTag) string {
 	default:
 		return styleDim.Render("[?]")
 	}
+}
+
+// authorChip renders a colored author-name chip used in headers and
+// commit cards. Each author maps to a stable palette color via
+// replay.AuthorColor — across the run, the same name always gets the
+// same hue, so the eye learns "who's on screen" without reading.
+//
+// Bold is intentional: the chip needs to compete visually with the
+// branch tag and date that sit next to it on the metadata line.
+func authorChip(name string) string {
+	if name == "" {
+		return ""
+	}
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color(replay.AuthorColor(name))).
+		Bold(true).
+		Render(name)
 }
 
 // statusBadge renders the one-letter A/M/D/R/C indicator next to a

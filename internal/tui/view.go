@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/S-Nakamur-a/gitfilm/internal/model"
 	"github.com/charmbracelet/lipgloss"
@@ -89,16 +90,18 @@ func splitPaneWidths(width int) (leftW, rightW int) {
 }
 
 // renderHeader draws the top status line — branch / commit
-// counter / commit metadata.
+// counter / commit metadata. Author name is tinted by the
+// per-author palette (replay.AuthorColor) so the eye picks up
+// "who's on screen" at a glance, the way film viewers track
+// characters across cuts.
 func (m programModel) renderHeader(c model.Commit) string {
-	return styleTitle.Render(fmt.Sprintf(
-		"gitfilm  %s ⇒ %s   commit %d/%d   %s   %s   %s",
+	prefix := styleTitle.Render(fmt.Sprintf(
+		"gitfilm  %s ⇒ %s   commit %d/%d   %s   ",
 		m.history.Branch, m.history.Against,
 		m.idx+1, len(m.history.Commits),
 		c.When.Format("2006-01-02 15:04"),
-		c.AuthorName,
-		tagLabel(c.Tag),
 	))
+	return prefix + authorChip(c.AuthorName) + "   " + tagLabel(c.Tag)
 }
 
 // renderSubject draws a one-line bold commit subject with optional
@@ -114,7 +117,8 @@ func (m programModel) renderSubject(c model.Commit, width int) string {
 }
 
 // renderFooter draws the bottom chrome: per-commit progress bar,
-// time-axis timeline strip with caret, legend, and key-hint line.
+// time-axis timeline strip with caret, running totals (HUD),
+// legend, and key-hint line.
 func (m programModel) renderFooter() string {
 	w := m.width
 	if w <= 0 {
@@ -123,15 +127,73 @@ func (m programModel) renderFooter() string {
 	barW := w - 4
 	progress := m.renderCommitProgress(barW)
 	bar := m.renderTimelineBar(barW)
+	hud := m.renderHUD()
 	legend := footerLegend(m.history.Against)
 	hint := m.footerHint()
 
-	parts := []string{progress, bar, legend, hint}
+	parts := []string{progress, bar, hud, legend, hint}
 	out := strings.Join(parts, "\n")
 	// Bar contributes 2 lines (cells + caret); everything else 1.
 	// Compute height from the actual content so future structural
 	// changes don't need a magic number here.
 	return clipPane(out, w, strings.Count(out, "\n")+1)
+}
+
+// renderHUD draws the running-counters line: cumulative
+// added/removed/files/days so the user sees the "runtime" of the
+// film at a glance, like a stopwatch in the corner of a sports
+// broadcast. Reads from the live TreeState so totals are always in
+// sync with what's been animated.
+func (m programModel) renderHUD() string {
+	if len(m.history.Commits) == 0 {
+		return ""
+	}
+	cnt := m.tree.Counts()
+	cur := m.history.Commits[m.idx]
+	first := m.history.Commits[0].When
+	span := cur.When.Sub(first)
+	addStr := styleAdd.Render(fmt.Sprintf("+%s", humanCount(cnt.Added)))
+	delStr := styleDel.Render(fmt.Sprintf("-%s", humanCount(cnt.Removed)))
+	files := styleNew.Render(fmt.Sprintf("%d files", cnt.UniqueFiles))
+	dates := styleDim.Render(fmt.Sprintf("%s → %s · %s",
+		first.Format("2006-01-02"),
+		cur.When.Format("2006-01-02"),
+		humanSpan(span)))
+	return strings.Join([]string{addStr, delStr, files, dates}, styleDim.Render("  ·  "))
+}
+
+// humanCount formats integers with K/M suffixes so the HUD stays
+// glanceable on huge histories. 999 stays as "999"; 1500 becomes
+// "1.5K"; 2_300_000 becomes "2.3M". Keeps one decimal place
+// because zero decimals reads as a step function and feels jumpy
+// when scrubbing.
+func humanCount(n int) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1000)
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+}
+
+// humanSpan formats a wall-clock duration as the largest sensible
+// unit (days/months/years). Same intent as GapLabel but reads as a
+// summary ("3 months span") rather than a transition ("3 months
+// later").
+func humanSpan(d time.Duration) string {
+	days := int(d.Hours() / 24)
+	switch {
+	case days < 1:
+		return "today"
+	case days < 30:
+		return fmt.Sprintf("%dd span", days)
+	case days < 365:
+		return fmt.Sprintf("%dmo span", days/30)
+	default:
+		return fmt.Sprintf("%.1fy span", float64(days)/365)
+	}
 }
 
 func footerLegend(againstName string) string {
