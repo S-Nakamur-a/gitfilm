@@ -35,6 +35,46 @@ Useful runtime flags (full list in `internal/cli/root.go`):
 Go version: **1.25** (see `go.mod`). Dependencies: `bubbletea`, `lipgloss`,
 `cobra`. No vendored modules.
 
+## Security invariant: zero external network egress
+
+This tool reads `.git` contents (commit messages, diffs, author identities,
+private branch names, possibly secrets accidentally committed) and must
+**never** send any of it off the host. Treat this as a hard invariant, not a
+guideline:
+
+- **No Go network APIs.** The Go binary must not import `net/http`,
+  `net/url`'s client, `net`-level dialers, mail/SMTP/etc., or any third-party
+  library that does. The only allowed external process is `git` itself
+  (`exec.Command("git", ...)` in `internal/gitlog/loader.go`). Do not shell
+  out to `curl`/`wget`/`nc`/etc.
+- **HTML output is fully self-contained.** The single `gitfilm.html` file
+  must work on an air-gapped machine opened from disk. That means
+  `internal/htmlout/template.html` and the streamed `<script id="chunk-N">`
+  tags must contain **zero** outbound references: no `<link>`, no
+  `<script src=…>`, no `<iframe>`/`<img>`/`<video>`/`<audio>`/`<source>`
+  with remote URLs, no `@font-face`, no `@import`, no `url(...)` pointing
+  off-origin, no CDN. Fonts use system stacks only
+  (`ui-monospace, …, monospace` / `system-ui`).
+- **Player JS must not phone home.** No `fetch`, `XMLHttpRequest`,
+  `WebSocket`, `EventSource`, `navigator.sendBeacon`, `Image()` ping
+  patterns, or third-party analytics. The player only reads JSON out of
+  inline `<script>` tags via `document.getElementById(...).textContent` and
+  manipulates the DOM. Storage APIs (`localStorage`, `sessionStorage`,
+  `indexedDB`, `document.cookie`) are not currently used and should stay
+  unused — they don't egress, but they persist diff bytes to disk where
+  another tab could read them.
+- **HTML escaping in the payload is load-bearing.** `encodeMeta` and
+  `streamChunks` both call `enc.SetEscapeHTML(true)`; that is what stops a
+  crafted commit message from breaking out of the inline `<script>` and
+  smuggling a remote-loading tag into the page. Never flip this to `false`
+  for "smaller output" — the savings aren't worth it and the security
+  property is gone the moment you do.
+
+When adding a backend or touching `template.html`, re-verify with a quick
+grep: imports of `net/http`, occurrences of `http://`/`https://`/`ws://`,
+and `<link`/`<script src`/`<iframe`/`@import`/`@font-face` should all be
+zero across the repo.
+
 ## Architecture (read this before making cross-package changes)
 
 The data model is **renderer-agnostic**, and playback policy lives in a
@@ -185,6 +225,12 @@ once — both backends pick it up.
   panes. `clipPane` performs ANSI-aware horizontal truncation.
 
 ### HTML output (`internal/htmlout`)
+
+**Offline / no-egress contract**: see "Security invariant" above. The output
+file is meant to be openable on an air-gapped host straight from disk —
+`template.html` may not introduce any outbound references, and the player JS
+may not call `fetch`/`XHR`/`WebSocket`/`sendBeacon`/etc. All commit and diff
+bytes ride inline in `<script>` tags and are read via `textContent`.
 
 `template.html` is `//go:embed`ed and rendered with `html/template`. The
 JSON payload is **precomputed in Go**: per-commit `dwell_ms` and
