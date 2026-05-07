@@ -16,19 +16,13 @@
 package tui
 
 import (
-	"time"
-
 	"github.com/S-Nakamur-a/gitfilm/internal/gitlog"
 	"github.com/S-Nakamur-a/gitfilm/internal/model"
-	"github.com/S-Nakamur-a/gitfilm/internal/replay"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// DwellFor is re-exported for the CLI's --stats path.
-func DwellFor(c model.Commit) time.Duration { return replay.DwellFor(c) }
-
-// runProgram is the legacy / sync entry point: takes a fully
-// loaded History and starts the Bubble Tea program.
+// runProgram is the sync entry point: takes a fully loaded History and
+// starts the Bubble Tea program.
 func runProgram(h model.History, opts Options) error {
 	m := newModel(h, opts)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())

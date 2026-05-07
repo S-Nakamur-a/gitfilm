@@ -16,7 +16,7 @@ var (
 	styleDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	styleAdd      = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
 	styleDel      = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	styleNew = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	styleNew      = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
 	// styleFaintName paints tree-list filenames whose heat is in
 	// [HiddenBelow, FaintBelow) — alive but cooled. Drawn dim so the
 	// row reads as "still here, not the focus".

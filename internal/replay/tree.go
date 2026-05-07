@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"maps"
 	"math"
 	"sort"
 	"strings"
@@ -74,14 +75,14 @@ func DefaultSnapshotOpts() SnapshotOpts {
 // TreeState tracks per-file heat over time. Build it once, Step it per
 // commit, then call Snapshot to materialize a TreeNode tree.
 type TreeState struct {
-	heat     map[string]float64
-	touches  map[string]int
+	heat    map[string]float64
+	touches map[string]int
 	// deleted marks paths that have received a StatusDeleted event.
 	// They never render (deletion = instant disappearance) but the
 	// set is consulted by the touched-walk in SnapshotWith so the
 	// path's leftover heat/touches entries don't inject it back as a
 	// hot row. Re-adding the same path (StatusAdded) clears the bit.
-	deleted map[string]bool
+	deleted  map[string]bool
 	added    map[string]bool // freshly added in the current frame (cleared by next Step)
 	statuses map[string]model.ChangeStatus
 
@@ -122,42 +123,20 @@ type TreeState struct {
 // to cache periodic snapshots so backward navigation doesn't have to
 // replay history from the very beginning each time.
 func (t *TreeState) Clone() *TreeState {
-	c := &TreeState{
-		heat:         make(map[string]float64, len(t.heat)),
-		touches:      make(map[string]int, len(t.touches)),
-		deleted:      make(map[string]bool, len(t.deleted)),
-		added:        make(map[string]bool, len(t.added)),
-		statuses:     make(map[string]model.ChangeStatus, len(t.statuses)),
-		loc:          make(map[string]int, len(t.loc)),
-		existing:     make(map[string]bool, len(t.existing)),
+	return &TreeState{
+		heat:         maps.Clone(t.heat),
+		touches:      maps.Clone(t.touches),
+		deleted:      maps.Clone(t.deleted),
+		added:        maps.Clone(t.added),
+		statuses:     maps.Clone(t.statuses),
+		loc:          maps.Clone(t.loc),
+		existing:     maps.Clone(t.existing),
 		totalAdded:   t.totalAdded,
 		totalRemoved: t.totalRemoved,
 		totalCommits: t.totalCommits,
 		halfLife:     t.halfLife,
 		decay:        t.decay,
 	}
-	for k, v := range t.heat {
-		c.heat[k] = v
-	}
-	for k, v := range t.touches {
-		c.touches[k] = v
-	}
-	for k, v := range t.deleted {
-		c.deleted[k] = v
-	}
-	for k, v := range t.added {
-		c.added[k] = v
-	}
-	for k, v := range t.statuses {
-		c.statuses[k] = v
-	}
-	for k, v := range t.loc {
-		c.loc[k] = v
-	}
-	for k, v := range t.existing {
-		c.existing[k] = v
-	}
-	return c
 }
 
 func NewTreeState(halfLife float64) *TreeState {
@@ -255,11 +234,7 @@ func (t *TreeState) Step(c model.Commit) {
 // Returns a fresh map; callers can mutate freely without affecting
 // the underlying state.
 func (t *TreeState) LOCSnapshot() map[string]int {
-	out := make(map[string]int, len(t.loc))
-	for k, v := range t.loc {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(t.loc)
 }
 
 // HeatOf returns the post-decay heat for one path. Renderers use it
@@ -272,13 +247,23 @@ func (t *TreeState) HeatOf(path string) float64 { return t.heat[path] }
 // the state is empty (callers should avoid divide-by-zero).
 // O(N) — call sparingly (once per frame, not per cell).
 func (t *TreeState) MaxHeat() float64 {
-	max := 0.0
+	maxH := 0.0
 	for _, v := range t.heat {
-		if v > max {
-			max = v
+		if v > maxH {
+			maxH = v
 		}
 	}
-	return max
+	return maxH
+}
+
+// maxHeatFloor returns MaxHeat with a 1.0 floor so callers can divide
+// safely without an extra zero check. Internal helper used by snapshot
+// builders that need a normalization denominator.
+func (t *TreeState) maxHeatFloor() float64 {
+	if m := t.MaxHeat(); m > 0 {
+		return m
+	}
+	return 1
 }
 
 // Counts is a small read-only snapshot of TreeState's cumulative
@@ -330,15 +315,7 @@ func (t *TreeState) Snapshot() *TreeNode {
 // path's leftover heat/touches entries would inject the path back as
 // a normal hot row.
 func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
-	max := 0.0
-	for _, v := range t.heat {
-		if v > max {
-			max = v
-		}
-	}
-	if max <= 0 {
-		max = 1
-	}
+	maxH := t.maxHeatFloor()
 	root := &TreeNode{Name: "", Path: "", IsDir: true}
 
 	// Walk the union of touched-in-window and seeded paths in a single
@@ -361,7 +338,7 @@ func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 		}
 		seen[path] = true
 		heat := t.heat[path]
-		ratio := heat / max
+		ratio := heat / maxH
 		isCold := ratio < opts.HiddenBelow
 		if isCold && !t.existing[path] {
 			return
@@ -455,16 +432,7 @@ func (t *TreeState) HeatSnapshotWith(opts SnapshotOpts) HeatSnapshot {
 	if opts.HiddenBelow <= 0 {
 		return t.HeatSnapshot()
 	}
-	max := 0.0
-	for _, v := range t.heat {
-		if v > max {
-			max = v
-		}
-	}
-	if max <= 0 {
-		max = 1
-	}
-	threshold := opts.HiddenBelow * max
+	threshold := opts.HiddenBelow * t.maxHeatFloor()
 
 	hs := HeatSnapshot{
 		Heat:    make(map[string]float64),

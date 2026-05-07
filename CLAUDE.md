@@ -84,13 +84,14 @@ source. Those are the two central design constraints.
 ```
 cmd/git-film
    └─ blank-imports internal/htmlout, internal/tui  (registers them)
-   └─ internal/cli           Cobra command, flag parsing, --stats reporter
+   └─ internal/cli           Cobra command, flag parsing, dispatches to renderers
         └─ internal/output   Renderer interface + name registry
         └─ internal/gitlog   shells out to `git log -p`, parses to model.History
               └─ internal/model    History/Commit/FileChange/Hunk/DiffLine
-        └─ internal/replay   playback policy: anim, dwell, segments, TreeState
+        └─ internal/replay   playback policy: anim/scramble, dwell, segments, TreeState
               ├─ internal/tui     Bubble Tea program (consumes replay)
               └─ internal/htmlout single-file HTML (precomputes via replay)
+        └─ internal/stats    --stats report writer (consumes replay.DwellFor)
 ```
 
 `model.History` is the contract between the loader and any renderer. The
@@ -143,10 +144,14 @@ heat-decay state. Anything that "interprets" a `History` lives in
 This is the package both renderers depend on. It owns:
 
 - **Animation cost** (`anim.go`): `LineCost`, `HunkGap`, `MinFileBudget`,
-  `FileBudget`/`FileBudgetWith`, `ApplyFile`/`ApplyFileWith`, `PartialLine`,
+  `FileBudget`/`FileBudgetWith`, `ApplyFile`/`ApplyFileWith`,
   `CommitMaxBudget*`. Cost constants and the cursor algorithm live here so
   the TUI's typing animation and the HTML player burn budget at exactly
   the same rate.
+- **Per-line typing/scramble** (`scramble.go`): `PartialLine`, `ScrambleLine`,
+  `ScrambleConfig`, `DefaultScrambleCharset`, `DefaultScrambleAhead`. Split
+  out from `anim.go` so the budget math and the line-rendering helpers
+  evolve independently — different consumers, different change cadence.
 - **Visibility profiles**: `FullProfile` (TUI shows every hunk) and
   `FirstHunkProfile` (HTML shows the first hunk's first
   `VisibleLinesPerHunkHTML` lines). Pass a profile when the renderer
@@ -257,12 +262,13 @@ payloads dominate file size.
 
 - `Renderer` interface: `Run(History, Config, diag io.Writer) error`.
 - `Register(name, Renderer)` is called from each backend's `init()`.
-- `cli/root.go` dispatches batch-style outputs (HTML, stats) via
+- `cli/root.go` dispatches batch-style outputs (HTML) via
   `output.Get(opts.mode)`. **TUI is special-cased** to use
-  `tui.RunStream(loader, req)` — the renderer interface wants a
+  `tui.RunStream(loader, req, opts)` — the renderer interface wants a
   complete `model.History` upfront, which defeats progressive load.
   `cli/root.go` therefore imports `internal/tui` directly. The
-  registered TUI renderer remains as a non-streaming fallback.
+  registered TUI renderer is intentionally kept as a non-streaming
+  fallback so `output.Names()` still lists "tui" in the `--output` help.
 
 ## Conventions
 

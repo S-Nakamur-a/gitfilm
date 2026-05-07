@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -21,16 +20,15 @@ import (
 )
 
 type Loader struct {
-	repoPath string
-	runner   Runner
-	diag     io.Writer // optional; if non-nil, per-stage progress is written here
+	runner Runner
+	diag   io.Writer // optional; if non-nil, per-stage progress is written here
 }
 
 // SetDiag enables progress logging for this loader. Lines are formatted
 // for direct stderr consumption (each line prefixed with [gitfilm]).
 func (l *Loader) SetDiag(w io.Writer) { l.diag = w }
 
-func (l *Loader) logf(format string, args ...interface{}) {
+func (l *Loader) logf(format string, args ...any) {
 	if l.diag == nil {
 		return
 	}
@@ -49,7 +47,7 @@ type Runner interface {
 
 // NewLoader constructs a Loader using the real git binary in the given repo.
 func NewLoader(repoPath string) *Loader {
-	return &Loader{repoPath: repoPath, runner: &execRunner{repoPath: repoPath}}
+	return &Loader{runner: &execRunner{repoPath: repoPath}}
 }
 
 // NewLoaderWithRunner is for tests.
@@ -110,19 +108,8 @@ func (l *Loader) Load(req LoadRequest) (model.History, error) {
 	if err != nil {
 		return model.History{}, err
 	}
-	for i := range commits {
-		if featureSet == nil {
-			commits[i].Tag = model.BranchTagFeature
-		} else if _, ok := featureSet[commits[i].Hash]; ok {
-			commits[i].Tag = model.BranchTagFeature
-		} else {
-			commits[i].Tag = model.BranchTagAgainst
-		}
-	}
-	// reverse to oldest-first
-	for i, j := 0, len(commits)-1; i < j; i, j = i+1, j-1 {
-		commits[i], commits[j] = commits[j], commits[i]
-	}
+	applyTags(commits, featureSet)
+	reverseCommits(commits)
 	return model.History{
 		Branch:  req.Branch,
 		Against: req.Against,
@@ -149,75 +136,52 @@ func (l *Loader) loadCommitsBatched(req LoadRequest) ([]model.Commit, error) {
 	if total == 0 {
 		return nil, nil
 	}
-	// Shard size tuned so each chunk does enough work to amortize the
-	// fork/exec cost (~10ms) but not so much that one slow shard holds
-	// up everything. ~1000 commits/shard hits a good balance on
-	// monorepos in informal testing.
-	const targetShard = 1000
-	workers := runtime.NumCPU()
-	if workers > 8 {
-		workers = 8 // diminishing returns past 8 due to disk contention
-	}
-	shards := (total + targetShard - 1) / targetShard
-	if shards < workers {
-		workers = shards
-	}
-	if workers < 1 {
-		workers = 1
-	}
-	shardSize := (total + shards - 1) / shards
-	l.logf("sharding: %d shards × %d commits, %d workers", shards, shardSize, workers)
+	plan := planShards(total)
+	l.logf("sharding: %d shards × %d commits, %d workers", plan.Shards, plan.ShardSize, plan.Workers)
 
 	type result struct {
-		idx      int
-		commits  []model.Commit
-		gitDur   time.Duration
-		parseDur time.Duration
-		bytes    int
-		err      error
+		idx int
+		out shardOutput
+		err error
 	}
-	results := make(chan result, shards)
-	jobs := make(chan int, shards)
+	results := make(chan result, plan.Shards)
+	jobs := make(chan int, plan.Shards)
 	var done int64
 	tShardStart := time.Now()
-	for w := 0; w < workers; w++ {
+	for range plan.Workers {
 		go func() {
 			for shardIdx := range jobs {
-				skip := shardIdx * shardSize
-				take := shardSize
-				if skip+take > total {
-					take = total - skip
-				}
-				cs, gitDur, parseDur, nBytes, err := l.loadShardTimed(req, skip, take)
-				if l.diag != nil {
+				skip, take := plan.Window(shardIdx, total)
+				out, err := l.loadShardTimed(req, skip, take)
+				if l.diag != nil && err == nil {
 					n := atomic.AddInt64(&done, 1)
 					l.logf("shard %d/%d done: skip=%d take=%d git=%s parse=%s bytes=%.1f MB (%d/%d shards, %s elapsed)",
-						shardIdx, shards-1, skip, take,
-						gitDur.Round(time.Millisecond), parseDur.Round(time.Millisecond),
-						float64(nBytes)/1024/1024, n, int64(shards),
+						shardIdx, plan.Shards-1, skip, take,
+						out.GitDur.Round(time.Millisecond), out.ParseDur.Round(time.Millisecond),
+						float64(out.Bytes)/1024/1024, n, int64(plan.Shards),
 						time.Since(tShardStart).Round(time.Millisecond))
 				}
-				results <- result{idx: shardIdx, commits: cs, gitDur: gitDur, parseDur: parseDur, bytes: nBytes, err: err}
+				results <- result{idx: shardIdx, out: out, err: err}
 			}
 		}()
 	}
-	for i := 0; i < shards; i++ {
+	for i := range plan.Shards {
 		jobs <- i
 	}
 	close(jobs)
 
-	collected := make([][]model.Commit, shards)
+	collected := make([][]model.Commit, plan.Shards)
 	var totalGit, totalParse time.Duration
 	var totalBytes int
-	for i := 0; i < shards; i++ {
+	for range plan.Shards {
 		r := <-results
 		if r.err != nil {
 			return nil, r.err
 		}
-		collected[r.idx] = r.commits
-		totalGit += r.gitDur
-		totalParse += r.parseDur
-		totalBytes += r.bytes
+		collected[r.idx] = r.out.Commits
+		totalGit += r.out.GitDur
+		totalParse += r.out.ParseDur
+		totalBytes += r.out.Bytes
 	}
 	l.logf("shards finished: wall=%s, summed git=%s, summed parse=%s, total bytes=%.1f MB",
 		time.Since(tShardStart).Round(time.Millisecond),
@@ -262,7 +226,7 @@ func (l *Loader) commitCount(req LoadRequest) (int, error) {
 // the first-parent history, parses the output, and surfaces per-stage
 // timings and byte counts for diagnostics. Returned durations are wall
 // time inside `git log` (subprocess) and the local diff parser.
-func (l *Loader) loadShardTimed(req LoadRequest, skip, take int) ([]model.Commit, time.Duration, time.Duration, int, error) {
+func (l *Loader) loadShardTimed(req LoadRequest, skip, take int) (shardOutput, error) {
 	const format = beginMarker + "%n%H%n%h%n%an%n%ae%n%at%n%s%n" +
 		bodyOpenMarker + "%n%b%n" + bodyCloseMarker
 	args := []string{
@@ -277,15 +241,19 @@ func (l *Loader) loadShardTimed(req LoadRequest, skip, take int) ([]model.Commit
 		args = append(args, "--", req.SubDir)
 	}
 	tGit := time.Now()
-	out, err := l.runner.Run(args...)
+	raw, err := l.runner.Run(args...)
 	gitDur := time.Since(tGit)
 	if err != nil {
-		return nil, gitDur, 0, 0, err
+		return shardOutput{GitDur: gitDur}, err
 	}
 	tParse := time.Now()
-	cs, err := parseLogP(out, req.SubDir)
-	parseDur := time.Since(tParse)
-	return cs, gitDur, parseDur, len(out), err
+	cs, err := parseLogP(raw, req.SubDir)
+	return shardOutput{
+		Commits:  cs,
+		GitDur:   gitDur,
+		ParseDur: time.Since(tParse),
+		Bytes:    len(raw),
+	}, err
 }
 
 // featureSet returns the set of commits reachable from branch but not

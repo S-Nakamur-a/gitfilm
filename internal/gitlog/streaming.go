@@ -2,7 +2,6 @@ package gitlog
 
 import (
 	"fmt"
-	"runtime"
 	"sync"
 	"time"
 
@@ -73,63 +72,34 @@ func (l *Loader) loadStream(req LoadRequest, out chan<- LoadBatch) {
 		return
 	}
 
-	const targetShard = 1000
-	workers := runtime.NumCPU()
-	if workers > 8 {
-		workers = 8
-	}
-	shards := (total + targetShard - 1) / targetShard
-	if shards < workers {
-		workers = shards
-	}
-	if workers < 1 {
-		workers = 1
-	}
-	shardSize := (total + shards - 1) / shards
-	l.logf("stream sharding: %d shards × %d commits, %d workers", shards, shardSize, workers)
+	plan := planShards(total)
+	l.logf("stream sharding: %d shards × %d commits, %d workers", plan.Shards, plan.ShardSize, plan.Workers)
 
 	type result struct {
 		idx     int
 		commits []model.Commit
 		err     error
 	}
-	results := make(chan result, shards)
-	jobs := make(chan int, shards)
+	results := make(chan result, plan.Shards)
+	jobs := make(chan int, plan.Shards)
 
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range plan.Workers {
+		wg.Go(func() {
 			for shardIdx := range jobs {
-				skip := shardIdx * shardSize
-				take := shardSize
-				if skip+take > total {
-					take = total - skip
-				}
-				cs, _, _, _, err := l.loadShardTimed(req, skip, take)
+				skip, take := plan.Window(shardIdx, total)
+				out, err := l.loadShardTimed(req, skip, take)
 				if err == nil {
-					// Tag according to feature set, mirroring Load.
-					for i := range cs {
-						if featureSet == nil {
-							cs[i].Tag = model.BranchTagFeature
-						} else if _, ok := featureSet[cs[i].Hash]; ok {
-							cs[i].Tag = model.BranchTagFeature
-						} else {
-							cs[i].Tag = model.BranchTagAgainst
-						}
-					}
+					applyTags(out.Commits, featureSet)
 					// Reverse so oldest comes first within the shard;
 					// the consumer can append straight to its history.
-					for i, j := 0, len(cs)-1; i < j; i, j = i+1, j-1 {
-						cs[i], cs[j] = cs[j], cs[i]
-					}
+					reverseCommits(out.Commits)
 				}
-				results <- result{idx: shardIdx, commits: cs, err: err}
+				results <- result{idx: shardIdx, commits: out.Commits, err: err}
 			}
-		}()
+		})
 	}
-	for i := 0; i < shards; i++ {
+	for i := range plan.Shards {
 		jobs <- i
 	}
 	close(jobs)
@@ -140,9 +110,9 @@ func (l *Loader) loadStream(req LoadRequest, out chan<- LoadBatch) {
 	// signal the error on the final batch — partial deliveries before
 	// the failure are kept (the consumer already saw them).
 	pending := make(map[int][]model.Commit)
-	nextWanted := shards - 1
+	nextWanted := plan.Shards - 1
 	var streamErr error
-	for i := 0; i < shards; i++ {
+	for range plan.Shards {
 		r := <-results
 		if r.err != nil {
 			if streamErr == nil {

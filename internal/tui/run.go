@@ -8,14 +8,10 @@ import (
 	"github.com/S-Nakamur-a/gitfilm/internal/output"
 )
 
-// Run is the historical entrypoint for fully-loaded histories. Kept
-// for callers that already have a History in hand (e.g. tests).
-func Run(h model.History) error {
-	return runProgram(h, Options{})
-}
-
-// RunWithOptions is Run plus opt-in toggles (e.g. scramble).
-func RunWithOptions(h model.History, opts Options) error {
+// Run starts the TUI on a fully-loaded history. Used by the registered
+// renderer adapter (non-streaming) and by tests that already hold a
+// History. Pass Options{} for default behaviour.
+func Run(h model.History, opts Options) error {
 	return runProgram(h, opts)
 }
 
@@ -27,19 +23,15 @@ func RunWithOptions(h model.History, opts Options) error {
 //
 // Wires the loader and the TUI program directly so the CLI doesn't
 // need to know about the channel plumbing.
-func RunStream(loader *gitlog.Loader, req gitlog.LoadRequest) error {
-	return RunStreamWithOptions(loader, req, Options{})
-}
-
-// RunStreamWithOptions is RunStream plus opt-in toggles.
-func RunStreamWithOptions(loader *gitlog.Loader, req gitlog.LoadRequest, opts Options) error {
+func RunStream(loader *gitlog.Loader, req gitlog.LoadRequest, opts Options) error {
 	ch := loader.LoadStream(req)
 	return runStreamingProgram(req.Branch, req.Against, ch, opts)
 }
 
 // renderer adapts the TUI to the output.Renderer interface for the
-// non-streaming path. The CLI special-cases TUI for streaming, so
-// this is mostly here to keep the output.Names() listing honest.
+// non-streaming path. The CLI special-cases TUI for streaming, so this
+// adapter mainly exists so output.Names() still lists "tui" in the
+// --output help text.
 type renderer struct{}
 
 func (renderer) Run(h model.History, cfg output.Config, _ io.Writer) error {

@@ -18,8 +18,8 @@ func unixToTime(unix int64) time.Time { return time.Unix(unix, 0) }
 // either burns memory without changing what the user sees. These are
 // soft caps applied at parse time.
 const (
-	maxLinesPerHunk = 80
-	maxHunksPerFile = 30
+	maxLinesPerHunk   = 80
+	maxHunksPerFile   = 30
 	maxFilesPerCommit = 100
 )
 
