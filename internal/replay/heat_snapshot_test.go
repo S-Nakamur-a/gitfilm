@@ -40,40 +40,44 @@ func TestHeatSnapshotWith_KeepsLukewarmAboveHiddenBelow(t *testing.T) {
 	}
 }
 
-func TestHeatSnapshotWith_DropsGhostWhenHeatBelowThreshold(t *testing.T) {
+func TestHeatSnapshotWith_DeletedPathsAreDropped(t *testing.T) {
 	st := NewTreeState(0)
-	// removed.go gets a tiny initial heat then is deleted. With hot.go
-	// dominating, removed.go's heat ratio is below HiddenBelow. Ghost
-	// must be dropped or it would resurrect as a permanent 👻 row in
-	// the JS branch that fires when a path is absent from heat.
+	// removed.go has substantial heat — under the old "ghost" model
+	// this would survive the heat-ratio filter. Under the current
+	// model (deletion = instant disappearance) it must vanish from
+	// every map regardless of heat.
 	st.Step(model.Commit{Files: []model.FileChange{
-		{Path: "hot.go", Status: model.StatusAdded, Added: 1000},
-		{Path: "removed.go", Status: model.StatusAdded, Added: 1},
-	}})
-	st.Step(model.Commit{Files: []model.FileChange{
-		{Path: "removed.go", Status: model.StatusDeleted, Removed: 0},
-	}})
-
-	hs := st.HeatSnapshotWith(SnapshotOpts{HiddenBelow: 0.005})
-	if hs.Ghosts["removed.go"] {
-		t.Errorf("ghost with below-threshold heat should be dropped to match unfiltered JS visibility")
-	}
-}
-
-func TestHeatSnapshotWith_KeepsGhostWhenHeatPassesThreshold(t *testing.T) {
-	st := NewTreeState(0)
-	// removed.go has substantial heat then is deleted in the same frame
-	// run. Ratio passes threshold → ghost must be kept (the JS will
-	// render it via the heat row branch, which is fine).
-	st.Step(model.Commit{Files: []model.FileChange{
+		{Path: "kept.go", Status: model.StatusAdded, Added: 100},
 		{Path: "removed.go", Status: model.StatusAdded, Added: 100},
 	}})
 	st.Step(model.Commit{Files: []model.FileChange{
 		{Path: "removed.go", Status: model.StatusDeleted, Removed: 50},
 	}})
 	hs := st.HeatSnapshotWith(SnapshotOpts{HiddenBelow: 0.005})
-	if !hs.Ghosts["removed.go"] {
-		t.Errorf("ghost with above-threshold heat should be retained")
+	if _, ok := hs.Heat["removed.go"]; ok {
+		t.Errorf("deleted path must not appear in Heat")
+	}
+	if _, ok := hs.Touches["removed.go"]; ok {
+		t.Errorf("deleted path must not appear in Touches")
+	}
+	if _, ok := hs.Heat["kept.go"]; !ok {
+		t.Errorf("non-deleted siblings must remain")
+	}
+}
+
+func TestHeatSnapshot_DeletedPathsAreDropped(t *testing.T) {
+	// Same property for the unfiltered HeatSnapshot — deletion is a
+	// snapshot-level filter, not a HiddenBelow threshold thing.
+	st := NewTreeState(0)
+	st.Step(model.Commit{Files: []model.FileChange{
+		{Path: "removed.go", Status: model.StatusAdded, Added: 100},
+	}})
+	st.Step(model.Commit{Files: []model.FileChange{
+		{Path: "removed.go", Status: model.StatusDeleted, Removed: 50},
+	}})
+	hs := st.HeatSnapshot()
+	if _, ok := hs.Heat["removed.go"]; ok {
+		t.Errorf("deleted path must not appear in unfiltered Heat")
 	}
 }
 

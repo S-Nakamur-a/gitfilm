@@ -62,11 +62,21 @@ func (m programModel) renderBody(cur model.Commit, leftW, rightW, bodyH int) str
 	innerRight := rightW - innerPad
 
 	innerLeftH := bodyH - 2
+	innerRightH := bodyH - 2
+
+	// Treemap fills its pane exactly and never overflows, so we
+	// route through scrollWindow only for the tree-list view. The
+	// right pane is always potentially overflowing.
 	leftBody := m.renderLeftPane(innerLeft, innerLeftH)
+	if m.viewMode == ViewModeTree {
+		leftBody = scrollWindow(leftBody, m.treeOffset, innerLeftH)
+	}
+	rightBody := scrollWindow(m.renderRight(cur, innerRight, innerRightH), m.filesOffset, innerRightH)
+
 	left := stylePane.Width(leftW).MaxWidth(leftW).Height(bodyH).
 		Render(clipPane(leftBody, innerLeft, innerLeftH))
 	right := stylePane.Width(rightW).MaxWidth(rightW).Height(bodyH).
-		Render(clipPane(m.renderRight(cur, innerRight, bodyH-2), innerRight, bodyH-2))
+		Render(clipPane(rightBody, innerRight, innerRightH))
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
@@ -218,7 +228,6 @@ func footerLegend(againstName string) string {
 		styleAdd.Render("+ add"),
 		styleDel.Render("- del"),
 		styleNew.Render("✨ new"),
-		styleGhost.Render("👻 deleted"),
 		"heat: " + strings.Join(heatChips, " "),
 	}, "  ")
 }
@@ -238,7 +247,7 @@ func (m programModel) footerHint() string {
 	}
 	hint := styleDim.Render("space: play/pause   ←/→: step   shift+←/→: ±10   +/-: speed (") +
 		speedTag + styleDim.Render(", 0:reset)   g/G: ends   t: view (") +
-		styleNew.Render(viewTag) + styleDim.Render(")   q: quit")
+		styleNew.Render(viewTag) + styleDim.Render(")   ↑/↓: scroll files   J/K: scroll tree   q: quit")
 	if m.loadErr != nil {
 		return styleDel.Render("load error: "+m.loadErr.Error()) + "  " + hint
 	}

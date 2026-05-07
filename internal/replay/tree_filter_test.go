@@ -59,24 +59,29 @@ func TestSnapshotWith_FaintForLukewarmFiles(t *testing.T) {
 	}
 }
 
-func TestSnapshotWith_DeletedAlwaysShown(t *testing.T) {
+func TestSnapshotWith_DeletedFileVanishes(t *testing.T) {
+	// Deletion is now an instant disappearance — the path should not
+	// be in the rendered tree at all, regardless of how much heat its
+	// final commit added. Under the old "ghost" model this rendered
+	// as a 👻 row that hung around for many frames. The state map
+	// (t.deleted) still tracks the path internally so the touched-walk
+	// can filter it; that's why we also assert the sibling stays.
 	st := NewTreeState(0)
 	st.Step(model.Commit{Files: []model.FileChange{
-		{Path: "hot.go", Status: model.StatusAdded, Added: 1000},
-		{Path: "removed.go", Status: model.StatusAdded, Added: 1},
+		{Path: "kept.go", Status: model.StatusAdded, Added: 100},
+		{Path: "removed.go", Status: model.StatusAdded, Added: 100},
 	}})
 	st.Step(model.Commit{Files: []model.FileChange{
-		{Path: "removed.go", Status: model.StatusDeleted, Removed: 1},
+		{Path: "removed.go", Status: model.StatusDeleted, Removed: 50},
 	}})
 	root := st.SnapshotWith(SnapshotOpts{FaintBelow: 0.05, HiddenBelow: 0.005})
 	files := map[string]*TreeNode{}
 	collectFiles(root, files)
-	g := files["removed.go"]
-	if g == nil {
-		t.Fatalf("ghost should remain visible after deletion")
+	if files["removed.go"] != nil {
+		t.Errorf("deleted file should not appear in tree, got %+v", files["removed.go"])
 	}
-	if !g.Deleted {
-		t.Errorf("ghost should be marked deleted, got %+v", g)
+	if files["kept.go"] == nil {
+		t.Errorf("sibling file must remain visible")
 	}
 }
 

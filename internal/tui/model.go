@@ -37,16 +37,14 @@ type programModel struct {
 	seedBase *replay.TreeState
 
 	// addsAt[i] / removesAt[i] are the per-commit added / removed
-	// line counts for commits[i]; filesAt[i] is the cumulative
-	// unique-files count AFTER stepping commits[i]. Adds and removes
-	// are kept separate (rather than summed into one "churn" number)
-	// so the footer's bipolar churn chart can show "this commit was
-	// mostly an add" vs "this commit was mostly a cleanup". All three
-	// grow as batches arrive so the mini-graphs can render whatever
-	// is loaded so far. Indexed parallel to history.Commits.
+	// line counts for commits[i]. Adds and removes are kept separate
+	// (rather than summed into one "churn" number) so the footer's
+	// bipolar churn chart can show "this commit was mostly an add" vs
+	// "this commit was mostly a cleanup". Both grow as batches arrive
+	// so the mini-graphs can render whatever is loaded so far.
+	// Indexed parallel to history.Commits.
 	addsAt    []int
 	removesAt []int
-	filesAt   []int
 
 	// Streaming state. loadCh is nil when the program was given a
 	// pre-built history; when non-nil, the model pulls commits in
@@ -83,6 +81,23 @@ type programModel struct {
 	// ViewModeTreemap renders a squarified treemap weighted by
 	// per-file LOC and shaded by current heat.
 	viewMode ViewMode
+
+	// treeOffset / filesOffset are the manual scroll positions for
+	// the left tree pane and the right files pane. Set by j/k/J/K
+	// (plus arrow keys / pgup / pgdn) and applied by the renderer's
+	// scrollWindow at draw time. Both are floors only — the
+	// renderer clamps to the actual content height each frame, so
+	// values past the end are harmless (they just snap to the last
+	// valid window).
+	//
+	// filesOffset resets to 0 on every commit change because each
+	// commit's file list is different and a stale offset would
+	// strand the user mid-list of an unrelated diff. treeOffset
+	// persists across commits — the tree itself is a continuous
+	// view that evolves between frames, so the user's scroll
+	// position is still meaningful after a step.
+	treeOffset  int
+	filesOffset int
 }
 
 // ViewMode selects the left-pane visualization.
@@ -181,15 +196,13 @@ func newModel(h model.History, opts Options) programModel {
 		scramble:  opts.scrambleConfig(),
 		colorMode: opts.ColorMode,
 	}
-	// Pre-compute the per-commit churn / cumulative-files arrays
-	// for the footer sparklines. The streaming path populates these
-	// incrementally in applyBatch; this branch covers Run(History).
+	// Pre-compute the per-commit churn arrays for the footer
+	// sparklines. The streaming path populates these incrementally
+	// in applyBatch; this branch covers Run(History).
 	if n := len(h.Commits); n > 0 {
 		m.commitDwell = m.computeDwell()
 		m.addsAt = make([]int, n)
 		m.removesAt = make([]int, n)
-		m.filesAt = make([]int, n)
-		walker := replay.NewTreeState(replay.DefaultHalfLife)
 		for i, c := range h.Commits {
 			adds, rems := 0, 0
 			for _, f := range c.Files {
@@ -198,8 +211,6 @@ func newModel(h model.History, opts Options) programModel {
 			}
 			m.addsAt[i] = adds
 			m.removesAt[i] = rems
-			walker.Step(c)
-			m.filesAt[i] = walker.Counts().UniqueFiles
 		}
 	}
 	return m

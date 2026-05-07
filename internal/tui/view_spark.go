@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"math"
 	"strings"
 
 	"github.com/S-Nakamur-a/gitfilm/internal/replay"
@@ -21,67 +22,41 @@ import (
 //     dim color is terminal-portable and reads as "same series,
 //     earlier/later" rather than "different category".
 //
-// Churn is bipolar: adds use the green family, removes use the red
-// family, and both share a 95th-percentile clip so a single huge
-// generated-file commit doesn't crush every other bar to one cell.
-//
 // Color picks (xterm 256-color):
 //   - 46  / 22  : bright green / dark green   for added lines
 //   - 203 / 88  : bright red   / dark red     for removed lines
-//   - 213 / 96  : bright pink  / dim violet   for files (cumulative)
 var (
-	sparkAddPast    = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
-	sparkAddFuture  = lipgloss.NewStyle().Foreground(lipgloss.Color("22"))
-	sparkRemPast    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	sparkRemFuture  = lipgloss.NewStyle().Foreground(lipgloss.Color("88"))
-	sparkFilesPast  = lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
-	sparkFilesFut   = lipgloss.NewStyle().Foreground(lipgloss.Color("96"))
-	sparkCaret      = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	sparkLabelAdd   = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
-	sparkLabelRem   = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	sparkLabelFiles = styleDim
+	sparkAddPast   = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
+	sparkAddFuture = lipgloss.NewStyle().Foreground(lipgloss.Color("22"))
+	sparkRemPast   = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	sparkRemFuture = lipgloss.NewStyle().Foreground(lipgloss.Color("88"))
+	sparkCaret     = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	sparkLabelAdd  = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
+	sparkLabelRem  = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 )
 
-// outlierClipPercentile is where we cap the bipolar churn Y axis.
-// Picked empirically: real human-authored commits live in the lower
-// 95% of the distribution; the top 5% is dominated by generated-file
-// dumps, vendored library imports, lockfile rewrites, and similar
-// "not really code" events. Letting those define max would crush
-// every interesting bar to a single pixel.
-const outlierClipPercentile = 0.95
-
-// renderMiniGraphs draws three compact sparklines summarizing the
-// loaded portion of the film:
+// renderMiniGraphs draws two compact sparklines summarizing per-commit
+// churn for the loaded portion of the film:
 //
-//   - row 1 ("add  "): per-commit added lines (green bars)
-//   - row 2 ("rem  "): per-commit removed lines (red bars), inline
-//     with files cumulative on the right of the same row
-//   - or — when terminal is wide enough — files renders inline on
-//     row 1 next to "add" and row 2 carries only "rem".
+//   - row 1 ("add  "): per-commit added lines (green bars).
+//   - row 2 ("rem  "): per-commit removed lines (red bars).
 //
-// The two-row layout is the price we pay for honest bipolar churn —
-// signed bars can't be packed into a single TUI row without losing
-// either magnitude or per-direction clarity.
+// Both rows share a log1p Y axis: bar height is
+// log1p(value)/log1p(ceiling). The log compression replaces the
+// previous 95th-percentile clip — a 50K-line generated commit and a
+// 100-line handwritten commit now both render with visible variation,
+// whereas linear scaling crushed everything below the clip into a
+// single cell. Adds and removes share one ceiling so a 1000-add bar
+// reads as the same height as a 1000-remove bar.
 //
-// Returns an empty string when the strip is too narrow or there's
-// nothing to graph yet; callers should treat empty as "skip the row".
+// Returns "" when the strip is too narrow or there's nothing to graph
+// yet; callers should treat empty as "skip the row".
 func (m programModel) renderMiniGraphs(width int) string {
-	if width < 28 || len(m.addsAt) == 0 {
+	if width < 16 || len(m.addsAt) == 0 {
 		return ""
 	}
-
-	// Layout: each labelled group is 6 cells of label + sparkline.
-	// We aim to fit "add | files" on one row and "rem" on the next,
-	// so files can stay aligned with the X axis of the bipolar churn.
-	const (
-		labelW = 6
-		gap    = 4
-	)
-	bodyW := width - 2*labelW - gap
-	if bodyW < 16 {
-		return ""
-	}
-	graphW := bodyW / 2
+	const labelW = 6
+	graphW := width - labelW
 	if graphW < 8 {
 		return ""
 	}
@@ -89,45 +64,40 @@ func (m programModel) renderMiniGraphs(width int) string {
 	loaded := len(m.addsAt)
 	caret := replay.CaretBucket(m.idx, loaded, graphW)
 
-	// Symmetric clip: the same ceiling for adds and removes so a
-	// 1000-add bar reads visually equal in height to a 1000-remove
-	// bar. Without this the two halves auto-scale independently and
-	// the user can't compare them.
-	clip := bipolarClip(m.addsAt, m.removesAt)
+	addBins := replay.DownsampleMax(m.addsAt, graphW)
+	remBins := replay.DownsampleMax(m.removesAt, graphW)
+	ceiling := logCeiling(addBins, remBins)
 
-	addBars := buildSparklineClipped(m.addsAt, graphW, caret, sparkAddPast, sparkAddFuture, clip)
-	remBars := buildSparklineClipped(m.removesAt, graphW, caret, sparkRemPast, sparkRemFuture, clip)
-	files := buildSparkline(m.filesAt, graphW, caret, sparkFilesPast, sparkFilesFut)
+	addBars := buildLogSparkline(addBins, graphW, caret, ceiling, sparkAddPast, sparkAddFuture)
+	remBars := buildLogSparkline(remBins, graphW, caret, ceiling, sparkRemPast, sparkRemFuture)
 
-	// Row 1: add + files  (files on the same row keeps the footer
-	// from growing 3 lines tall just because we went bipolar).
-	// Row 2: rem (with the file label cell blanked so the columns
-	// still line up).
-	row1 := sparkLabelAdd.Render("add   ") + addBars +
-		strings.Repeat(" ", gap) +
-		sparkLabelFiles.Render("files ") + files
+	row1 := sparkLabelAdd.Render("add   ") + addBars
 	row2 := sparkLabelRem.Render("rem   ") + remBars
-
 	return row1 + "\n" + row2
 }
 
-// bipolarClip returns the symmetric Y-axis ceiling for the bipolar
-// churn chart. We take the 95th percentile of the *combined* adds +
-// removes positive distribution so a few massive add-only or
-// remove-only commits both contribute to picking the threshold —
-// otherwise a repo that does 99% adds would clip removes to nothing.
-// The ceiling is at least 1 so all-zero / all-clipped bins still
-// produce a baseline glyph instead of dividing by zero.
-func bipolarClip(adds, removes []int) int {
-	combined := make([]int, 0, len(adds)+len(removes))
-	combined = append(combined, adds...)
-	combined = append(combined, removes...)
-	return max(replay.PercentileMax(combined, outlierClipPercentile), 1)
+// logCeiling returns the shared log1p Y-axis ceiling used by both
+// adds and removes so the two halves stay on the same scale. Floor at
+// log1p(1) so an all-zero series still produces a defined non-zero
+// denominator (the renderer maps zero values to a dim "·" anyway).
+func logCeiling(addBins, remBins []float64) float64 {
+	m := 1.0
+	for _, v := range addBins {
+		if v > m {
+			m = v
+		}
+	}
+	for _, v := range remBins {
+		if v > m {
+			m = v
+		}
+	}
+	return math.Log1p(m)
 }
 
-// buildSparkline renders one bucketed series at fixed width with no
-// clip — the Y axis spans 0 to the in-strip max. Used for files
-// (cumulative monotonic series) where outliers don't apply.
+// buildLogSparkline renders a binned series at fixed width on a log1p
+// Y axis. ceiling must already be log1p(maxValue) so we can divide by
+// it directly without recomputing per cell.
 //
 // caret is the bucket index to highlight; pass -1 to skip the
 // "you are here" marker. Rendering uses four tiers:
@@ -141,30 +111,14 @@ func bipolarClip(adds, removes []int) int {
 //   - bins past the loaded range : dim "·" baseline — still
 //     streaming in. Distinct from "future loaded" so the user can
 //     see "what we have vs. what's still coming".
-func buildSparkline(values []int, width, caret int, past, future lipgloss.Style) string {
-	return buildSparklineClipped(values, width, caret, past, future, 0)
-}
-
-// buildSparklineClipped is the same as buildSparkline but caps the
-// Y-axis at clip when clip > 0. Bins at or above clip render as the
-// full-height glyph; smaller bins use proportional glyphs against
-// the clip ceiling. This makes a "huge generated commit" bar visually
-// equivalent to a "moderately huge handwritten commit" bar — both
-// peg out at full height — but small commits remain readable
-// alongside them.
-func buildSparklineClipped(values []int, width, caret int, past, future lipgloss.Style, clip int) string {
+//
+// Zero-valued bins also render as "·" instead of the lowest glyph so
+// commits with no churn in this direction (e.g. an all-add commit
+// shown on the rem row) read as gaps in the beat rather than a faint
+// continuous line.
+func buildLogSparkline(binned []float64, width, caret int, ceiling float64, past, future lipgloss.Style) string {
 	if width <= 0 {
 		return ""
-	}
-	binned := replay.DownsampleMax(values, width)
-	ceiling := float64(clip)
-	if clip <= 0 {
-		ceiling = 0
-		for _, v := range binned {
-			if v > ceiling {
-				ceiling = v
-			}
-		}
 	}
 	var sb strings.Builder
 	for i := range width {
@@ -174,12 +128,10 @@ func buildSparklineClipped(values []int, width, caret int, past, future lipgloss
 		}
 		var glyph rune
 		switch {
-		case ceiling <= 0:
+		case binned[i] <= 0 || ceiling <= 0:
 			glyph = '·'
-		case binned[i] >= ceiling:
-			glyph = '█'
 		default:
-			glyph = replay.SparklineGlyph(binned[i] / ceiling)
+			glyph = replay.SparklineGlyph(math.Log1p(binned[i]) / ceiling)
 		}
 		s := past
 		switch {

@@ -60,13 +60,8 @@ type commitSummary struct {
 	MaxBudget   int    `json:"max_budget"`
 	Added       int    `json:"added"`
 	Removed     int    `json:"removed"`
-	// TotalFiles is the cumulative unique-file count after stepping
-	// this commit (matches what TreeState.Counts().UniqueFiles
-	// would return at that point). Powers the "files" mini-graph
-	// without forcing the player to parse every chunk's snapshot.
-	TotalFiles int    `json:"total_files"`
-	GapMS      int64  `json:"gap_ms"`   // wall-clock ms since previous commit
-	GapTier    string `json:"gap_tier"` // "" / "hint" / "banner"
+	GapMS       int64  `json:"gap_ms"`   // wall-clock ms since previous commit
+	GapTier     string `json:"gap_tier"` // "" / "hint" / "banner"
 }
 
 // commitDetail is the heavyweight per-commit record. Lives inside
@@ -128,7 +123,6 @@ type snapshotJSON struct {
 	Paths   []string  `json:"paths"`
 	Heat    []float64 `json:"heat"`
 	Touches []int     `json:"touches"`
-	Ghosts  []string  `json:"ghosts"`
 	Added   []string  `json:"added"`
 }
 
@@ -190,7 +184,7 @@ func buildPayloadTimed(h model.History, ropts RenderOptions, diag io.Writer) (me
 		}
 
 		ts = time.Now()
-		meta.Summaries = append(meta.Summaries, commitSummaryFor(c, gap, state.Counts().UniqueFiles))
+		meta.Summaries = append(meta.Summaries, commitSummaryFor(c, gap))
 		curChunk = append(curChunk, commitDetailFor(c, snap))
 		if len(curChunk) >= detailChunkSize {
 			chunks = append(chunks, curChunk)
@@ -233,7 +227,7 @@ func newMeta(h model.History, opts replay.SnapshotOpts, ropts RenderOptions) met
 	}
 }
 
-func commitSummaryFor(c model.Commit, gap time.Duration, totalFiles int) commitSummary {
+func commitSummaryFor(c model.Commit, gap time.Duration) commitSummary {
 	added, removed := 0, 0
 	for _, f := range c.Files {
 		added += f.Added
@@ -253,7 +247,6 @@ func commitSummaryFor(c model.Commit, gap time.Duration, totalFiles int) commitS
 		DwellMS:     dwell.Milliseconds(),
 		Added:       added,
 		Removed:     removed,
-		TotalFiles:  totalFiles,
 		GapMS:       gap.Milliseconds(),
 		GapTier:     gapTierJSON(replay.ClassifyGap(gap)),
 	}
@@ -319,10 +312,10 @@ func hunkJSONFor(hk model.Hunk) hunkJSON {
 	return hj
 }
 
-// buildSnapshot encodes a HeatSnapshot as parallel arrays. Paths
-// / heat / touches share index ordering; ghosts and added are
-// flat string arrays. Sorting paths makes output byte-stable
-// across runs (also helps gzip ratio on the resulting HTML).
+// buildSnapshot encodes a HeatSnapshot as parallel arrays. Paths /
+// heat / touches share index ordering; added is a flat string array.
+// Sorting paths makes output byte-stable across runs (also helps
+// gzip ratio on the resulting HTML).
 func buildSnapshot(hs replay.HeatSnapshot) snapshotJSON {
 	out := snapshotJSON{
 		Paths:   make([]string, 0, len(hs.Heat)),
@@ -337,10 +330,6 @@ func buildSnapshot(hs replay.HeatSnapshot) snapshotJSON {
 		out.Heat = append(out.Heat, hs.Heat[p])
 		out.Touches = append(out.Touches, hs.Touches[p])
 	}
-	for path := range hs.Ghosts {
-		out.Ghosts = append(out.Ghosts, path)
-	}
-	sort.Strings(out.Ghosts)
 	for path := range hs.Added {
 		out.Added = append(out.Added, path)
 	}

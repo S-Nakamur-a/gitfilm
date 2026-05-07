@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
@@ -58,4 +59,50 @@ func pluralS(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// scrollWindow returns the [offset, offset+height) slice of s split
+// on '\n', clamped so the window never extends past the last line,
+// with `↑ N more` / `↓ N more` hint rows replacing the top/bottom
+// row whenever content is hidden in that direction. The hint costs
+// one row of visible content per overflow side — we treat that as
+// part of paying for the scrolling affordance, which is more
+// honest than silently cutting content (the prior behavior).
+//
+// Returns the input unchanged when total lines fit inside height
+// (no scrolling needed) or height <= 0.
+//
+// Clamping is internal-only: the offset stored on the model is not
+// updated. Bubble Tea's View runs on a value-receiver copy, so
+// write-back would be lost anyway. The cost is "rapid bashing past
+// the bottom then pressing ↑ once" requires a few extra presses
+// before the window starts moving. Callers can mitigate by capping
+// offset growth at the keyboard handler with an over-estimate (see
+// scrollGrowCap usage in update.go) instead of letting it diverge.
+func scrollWindow(s string, offset, height int) string {
+	if height <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	total := len(lines)
+	if total <= height {
+		return s
+	}
+	maxOff := total - height
+	if offset > maxOff {
+		offset = maxOff
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	visible := make([]string, height)
+	copy(visible, lines[offset:offset+height])
+	if offset > 0 {
+		visible[0] = styleDim.Render(fmt.Sprintf("↑ %d more above", offset))
+	}
+	if offset+height < total {
+		hidden := total - (offset + height)
+		visible[height-1] = styleDim.Render(fmt.Sprintf("↓ %d more below", hidden))
+	}
+	return strings.Join(visible, "\n")
 }

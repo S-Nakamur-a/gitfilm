@@ -136,25 +136,23 @@ func TestSeed_HotDirAggregatesColdSiblings(t *testing.T) {
 func TestSeed_DeletedRemovesFromExisting(t *testing.T) {
 	st := NewTreeState(0)
 	st.Seed([]string{"obsolete.go", "main.go"})
-	// main.go is hot enough that the cold-files placeholder appears.
 	st.Step(model.Commit{Files: []model.FileChange{
 		{Path: "main.go", Status: model.StatusModified, Added: 1000},
 	}})
-	// Delete obsolete.go in a later commit.
+	// Delete obsolete.go in a later commit. The seed entry for it
+	// must NOT resurrect the path as a cold row — the deletion is
+	// expected to also drop it from t.existing so it doesn't leak
+	// back through the seeded-path branch in SnapshotWith.
 	st.Step(model.Commit{Files: []model.FileChange{
 		{Path: "obsolete.go", Status: model.StatusDeleted, Removed: 1},
 	}})
 	root := st.SnapshotWith(SnapshotOpts{FaintBelow: 0.05, HiddenBelow: 0.005})
 
-	// obsolete.go should appear as a ghost (deletion event) — and
-	// crucially should NOT also show up as a cold seed entry once
-	// the ghost expires.
-	g := findByName(root, "obsolete.go")
-	if g == nil {
-		t.Fatalf("expected ghost row for obsolete.go")
+	if findByName(root, "obsolete.go") != nil {
+		t.Errorf("deleted seed path must not survive in tree (state should clear t.existing)")
 	}
-	if !g.Deleted {
-		t.Errorf("obsolete.go should be marked Deleted, got %+v", g)
+	if findByName(root, "main.go") == nil {
+		t.Errorf("non-deleted seed path must remain")
 	}
 }
 

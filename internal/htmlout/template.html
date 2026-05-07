@@ -41,7 +41,6 @@
   .tree .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
   .tree .heat { width: 60px; height: 8px; background: #30363d; border-radius: 2px; overflow: hidden; }
   .tree .heat span { display: block; height: 100%; background: var(--against); }
-  .tree .deleted { color: var(--dim); text-decoration: line-through; }
   .tree .new { color: var(--new); }
   .tree .faint { color: var(--dim); opacity: 0.55; }
   .commit-card { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; }
@@ -121,23 +120,21 @@
   .hud .del { color: var(--del); font-weight: 600; }
   .hud .files { color: var(--new); font-weight: 600; }
   .hud .span { color: var(--dim); }
-  /* Mini graphs: per-commit bipolar churn (adds up / removes down,
-     anchored at zero) + cumulative file count (area). Sit directly
-     under the running-counters HUD so the numeric and visual reads
-     are stacked. The churn viewBox is 200×36 (twice the file viewBox
-     height) so adds and removes each get the same vertical room as
-     the original single-direction strip. */
+  /* Mini graph: per-commit bipolar churn (adds up / removes down,
+     anchored at zero). Sits directly under the running-counters HUD
+     so the numeric and visual reads are stacked. The viewBox is
+     200×36 so adds and removes each get a half-row's vertical room
+     (CHURN_ZERO = 18). Bar height is log1p(value)/log1p(max), which
+     compresses outliers without crushing small commits. */
   .hud-spark { display: flex; gap: 10px; align-items: center;
     margin-top: 4px; font-size: 10px; flex-wrap: wrap; }
   .hud-spark .label { color: var(--dim); width: 38px; flex: 0 0 38px;
     text-transform: uppercase; letter-spacing: 0.6px; }
   .hud-spark .label.churn { color: var(--add); }
-  .hud-spark .label.files { color: var(--feat); }
-  .hud-spark svg.spark { flex: 1 1 120px; min-width: 80px; max-width: 360px;
+  .hud-spark svg.spark { flex: 1 1 200px; min-width: 120px; max-width: 720px;
     background: rgba(255,255,255,0.025);
     border-radius: 2px; }
   .hud-spark svg#spark-churn { height: 30px; }
-  .hud-spark svg#spark-files { height: 18px; }
   .hud-spark .caret { stroke: var(--fg); stroke-opacity: 0.85; }
   /* Bipolar churn fills. Adds use --add (green), removes use --del
      (red). The zero baseline is a thin desaturated line so the eye
@@ -190,9 +187,7 @@
   <div class="hud-spark" aria-hidden="true">
     <span class="label churn">±lines</span>
     <svg id="spark-churn" class="spark" viewBox="0 0 200 36" preserveAspectRatio="none"></svg>
-    <span class="label files">files</span>
-    <svg id="spark-files" class="spark" viewBox="0 0 200 18" preserveAspectRatio="none"></svg>
-    <span class="label" title="±lines = per-commit added (above zero, green) and removed (below zero, red); top 5% clipped to keep generated-file commits from crushing the chart. files = cumulative unique-files count">?</span>
+    <span class="label" title="±lines = per-commit added (above zero, green) and removed (below zero, red). Bar height uses log1p(value)/log1p(max) so a 50K-line generated commit doesn't crush 100-line handwritten commits to a sliver.">?</span>
   </div>
   <div class="controls">
     <button id="play">▶</button>
@@ -282,7 +277,7 @@ function runGitfilm(data) {
   // commitAt merges the eager summary with the lazily-loaded detail
   // for full-commit access. Use this only when you actually need
   // files/snapshot/body — for tag/dwell/subject the summary suffices.
-  const emptyDetail = { body: '', files: [], snapshot: { paths: [], heat: [], touches: [], ghosts: [], added: [] } };
+  const emptyDetail = { body: '', files: [], snapshot: { paths: [], heat: [], touches: [], added: [] } };
   function commitAt(i) {
     const s = summaries[i] || {};
     const d = detailAt(i) || emptyDetail;
@@ -392,7 +387,7 @@ function runGitfilm(data) {
       heat.set(s.paths[j], s.heat[j]);
       touches.set(s.paths[j], s.touches[j]);
     }
-    const snap = { heat, touches, ghosts: new Set(s.ghosts), added: new Set(s.added) };
+    const snap = { heat, touches, added: new Set(s.added) };
     snapshotCache.set(i, snap);
     if (snapshotCache.size > snapshotCacheLimit) {
       const oldest = snapshotCache.keys().next().value;
@@ -423,14 +418,9 @@ function runGitfilm(data) {
       }
       return cur;
     }
-    const allPaths = new Set([...snap.heat.keys(), ...snap.ghosts]);
-    for (const path of allPaths) {
+    for (const path of snap.heat.keys()) {
       const parts = path.split('/');
       const dir = ensure(parts.slice(0, -1));
-      if (snap.ghosts.has(path) && !snap.heat.has(path)) {
-        dir.files.push({ name: parts[parts.length - 1], path, deleted: true });
-        continue;
-      }
       const heat = snap.heat.get(path) || 0;
       const ratio = heat / max;
       if (ratio < HIDDEN_BELOW) continue;
@@ -442,7 +432,6 @@ function runGitfilm(data) {
         faint: ratio < FAINT_BELOW,
         touches: snap.touches.get(path) || 0,
         isNew: snap.added.has(path),
-        deleted: false,
       });
     }
     // Recursively count visible descendants so we can prune empty dirs.
@@ -461,10 +450,10 @@ function runGitfilm(data) {
       }
       const files = node.files.sort((a, b) => a.name.localeCompare(b.name));
       for (const f of files) {
-        const cls = 'row ' + (f.deleted ? 'deleted' : (f.faint ? 'faint' : (f.isNew ? 'new' : '')));
-        const marker = f.deleted ? '👻 ' : (f.isNew ? '✨ ' : '');
+        const cls = 'row ' + (f.faint ? 'faint' : (f.isNew ? 'new' : ''));
+        const marker = f.isNew ? '✨ ' : '';
         const padding = 'padding-left:' + (depth * 12) + 'px';
-        if (f.deleted || f.faint) {
+        if (f.faint) {
           panel.appendChild(el('div', { class: cls, style: padding },
             el('span', { class: 'name' }, marker + f.name)));
           continue;
@@ -840,15 +829,15 @@ function runGitfilm(data) {
 
   // updateHUD writes the running-counters line. Cumulative
   // adds/removes come from the prefix sums; unique-files comes from
-  // the snapshot's heat+ghost paths so we don't double-count
-  // renames. Span uses the time bounds we already cached.
+  // the snapshot's heat paths (deleted files are filtered out
+  // upstream). Span uses the time bounds we already cached.
   function updateHUD() {
     const a = totalAdded[idx + 1];
     const r = totalRemoved[idx + 1];
     document.getElementById('hud-added').textContent = '+' + humanCount(a);
     document.getElementById('hud-removed').textContent = '-' + humanCount(r);
     const snap = snapshotAt(idx);
-    const uniq = (snap.heat ? snap.heat.size : 0) + (snap.ghosts ? snap.ghosts.size : 0);
+    const uniq = snap.heat ? snap.heat.size : 0;
     document.getElementById('hud-files').textContent = uniq + ' file' + (uniq === 1 ? '' : 's');
     const s0 = summaries[0] || {};
     const sc = summaries[idx] || {};
@@ -868,14 +857,8 @@ function runGitfilm(data) {
   // viewBox width so each bin renders at 1 unit wide — sub-pixel
   // antialiasing is handled by the browser.
   const SPARK_BINS = 200;
-  const SPARK_H = 18;          // single-direction strip height (files)
   const CHURN_H = 36;          // bipolar strip height (adds above, removes below)
   const CHURN_ZERO = CHURN_H / 2;
-  // Mirror of the TUI outlierClipPercentile in view_spark.go: cap the
-  // bipolar Y axis at the 95th percentile of the combined adds+removes
-  // distribution so a single 50K-line generated-file commit doesn't
-  // crush every other bar to a sliver.
-  const CHURN_CLIP_PCT = 0.95;
   // SVG namespace identifier required by createElementNS for the
   // browser to interpret the new node as SVG. Per the XML
   // Namespaces spec this is an identifier — browsers do NOT
@@ -912,29 +895,31 @@ function runGitfilm(data) {
   function buildSparklines() {
     const addVals = new Array(commitCount);
     const remVals = new Array(commitCount);
-    const filesVals = new Array(commitCount);
     for (let i = 0; i < commitCount; i++) {
       const s = summaries[i] || {};
       addVals[i] = s.added | 0;
       remVals[i] = s.removed | 0;
-      filesVals[i] = s.total_files | 0;
     }
     const addBins = downsampleMax(addVals, SPARK_BINS);
     const remBins = downsampleMax(remVals, SPARK_BINS);
-    const filesBins = downsampleMax(filesVals, SPARK_BINS);
 
-    // Symmetric clip: take the 95th percentile of the *combined*
-    // adds+removes distribution so both halves share one ceiling
-    // and a 1000-line add bar visually equals a 1000-line remove
-    // bar. The fallback to 1 keeps division by zero away when
-    // every commit is a no-op (e.g. merge commits with no files).
-    const churnClip = Math.max(1, percentile([...addVals, ...remVals], CHURN_CLIP_PCT));
-    const filesMax = filesBins.reduce((a, b) => a > b ? a : b, 0) || 1;
+    // Shared log1p ceiling: bar height = log1p(value)/log1p(max).
+    // The log compression replaces the previous 95th-percentile clip
+    // — a single 50K-line generated commit no longer crushes 100-line
+    // handwritten commits to one pixel; instead it's just a few
+    // pixels taller. Adds and removes use the same ceiling so a
+    // 1000-add bar reads as the same height as a 1000-remove bar.
+    // Floor at log1p(1) so all-zero input still has a defined
+    // non-zero denominator (zero-valued bins skip drawing anyway).
+    let peak = 1;
+    for (let i = 0; i < addBins.length; i++) if (addBins[i] > peak) peak = addBins[i];
+    for (let i = 0; i < remBins.length; i++) if (remBins[i] > peak) peak = remBins[i];
+    const ceiling = Math.log1p(peak);
 
     // Bipolar churn: adds rise from the zero line (y=CHURN_ZERO)
     // upward; removes drop from zero downward. Each half gets the
-    // same vertical room (CHURN_ZERO units = SPARK_H), so the chart
-    // is visually balanced even on a repo that does only adds.
+    // same vertical room (CHURN_ZERO units), so the chart is
+    // visually balanced even on a repo that does only adds.
     buildSpark('spark-churn', 'cc', CHURN_H, (group) => {
       const barInset = 0.075;
       const halfH = CHURN_ZERO - 1;
@@ -948,9 +933,8 @@ function runGitfilm(data) {
       zero.setAttribute('class', 'zero-line');
       group.appendChild(zero);
       for (let i = 0; i < addBins.length; i++) {
-        const a = Math.min(addBins[i], churnClip);
-        if (a > 0) {
-          const h = (a / churnClip) * halfH;
+        if (addBins[i] > 0) {
+          const h = (Math.log1p(addBins[i]) / ceiling) * halfH;
           const r = document.createElementNS(SVG_NS, 'rect');
           r.setAttribute('x', String(i + barInset));
           r.setAttribute('y', String(CHURN_ZERO - h));
@@ -959,9 +943,8 @@ function runGitfilm(data) {
           r.setAttribute('class', 'bar-add');
           group.appendChild(r);
         }
-        const rm = Math.min(remBins[i], churnClip);
-        if (rm > 0) {
-          const h = (rm / churnClip) * halfH;
+        if (remBins[i] > 0) {
+          const h = (Math.log1p(remBins[i]) / ceiling) * halfH;
           const r = document.createElementNS(SVG_NS, 'rect');
           r.setAttribute('x', String(i + barInset));
           r.setAttribute('y', String(CHURN_ZERO));
@@ -972,48 +955,6 @@ function runGitfilm(data) {
         }
       }
     });
-
-    if (filesBins.length > 1) {
-      let line = '';
-      for (let i = 0; i < filesBins.length; i++) {
-        const x = i + 0.5;
-        const y = SPARK_H - (filesBins[i] / filesMax) * (SPARK_H - 2);
-        line += (i === 0 ? 'M' : 'L') + x.toFixed(2) + ',' + y.toFixed(2);
-      }
-      const lastX = (filesBins.length - 1 + 0.5).toFixed(2);
-      const areaD = line + ' L' + lastX + ',' + SPARK_H + ' L0.5,' + SPARK_H + ' Z';
-      buildSpark('spark-files', 'fc', SPARK_H, (group) => {
-        const area = document.createElementNS(SVG_NS, 'path');
-        area.setAttribute('d', areaD);
-        area.setAttribute('fill', 'var(--feat)');
-        area.setAttribute('fill-opacity', '0.18');
-        group.appendChild(area);
-        const path = document.createElementNS(SVG_NS, 'path');
-        path.setAttribute('d', line);
-        path.setAttribute('fill', 'none');
-        path.setAttribute('stroke', 'var(--feat)');
-        path.setAttribute('stroke-width', '1');
-        path.setAttribute('vector-effect', 'non-scaling-stroke');
-        group.appendChild(path);
-      });
-    } else {
-      // No data: still emit the scaffolding so updateSparkCaret can
-      // resize the clip rects without null-checks.
-      buildSpark('spark-files', 'fc', SPARK_H, () => {});
-    }
-  }
-  // percentile picks the value at p∈[0,1] in the sorted positive
-  // entries of values. Mirrors replay.PercentileMax in Go: zeros
-  // and negatives are dropped so an all-add or all-remove repo
-  // still gets a sensible ceiling. Returns 0 when nothing positive
-  // exists; callers should clamp to ≥1 to avoid division by zero.
-  function percentile(values, p) {
-    const pos = [];
-    for (const v of values) if (v > 0) pos.push(v);
-    if (pos.length === 0) return 0;
-    pos.sort((a, b) => a - b);
-    const idx = Math.min(pos.length - 1, Math.max(0, Math.round(p * (pos.length - 1))));
-    return pos[idx];
   }
   // buildSpark wires up <defs> with two clipPaths plus two <g>
   // groups (past/future) that share the same content via a draw()
@@ -1086,12 +1027,8 @@ function runGitfilm(data) {
     const x = String(b + 0.5);
     const cc1 = document.getElementById('spark-churn-caret');
     if (cc1) { cc1.setAttribute('x1', x); cc1.setAttribute('x2', x); }
-    const cc2 = document.getElementById('spark-files-caret');
-    if (cc2) { cc2.setAttribute('x1', x); cc2.setAttribute('x2', x); }
     setRect('cc-past-rect', 0, boundary);
     setRect('cc-future-rect', boundary, futureWidth);
-    setRect('fc-past-rect', 0, boundary);
-    setRect('fc-future-rect', boundary, futureWidth);
   }
   function setRect(id, x, width) {
     const r = document.getElementById(id);

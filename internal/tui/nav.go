@@ -39,6 +39,12 @@ func (m *programModel) jumpTo(target int) {
 	}
 	m.idx = target
 	m.dwellElapsed = 0
+	// Each commit has a different file list, so any scroll position
+	// the user established on the previous commit is meaningless on
+	// the new one — reset rather than carry it forward and strand
+	// the user mid-list of an unrelated diff. treeOffset persists
+	// because the tree is a continuous view across commits.
+	m.filesOffset = 0
 	if target >= 0 && target < len(m.history.Commits) {
 		m.commitDwell = m.computeDwell()
 	}

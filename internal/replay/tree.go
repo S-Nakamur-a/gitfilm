@@ -30,8 +30,7 @@ type TreeNode struct {
 	Name      string
 	Path      string // full path from the repo root (or subdir)
 	IsDir     bool
-	Deleted   bool // for deleted files we keep a "ghost" entry briefly
-	Touches   int  // commits that have touched this file up to current frame
+	Touches   int // commits that have touched this file up to current frame
 	Heat      float64
 	HeatRatio float64 // Heat / MaxHeat at snapshot time, useful for filtering
 	Faint     bool    // true when heat is decayed but not yet hidden
@@ -77,7 +76,12 @@ func DefaultSnapshotOpts() SnapshotOpts {
 type TreeState struct {
 	heat     map[string]float64
 	touches  map[string]int
-	deleted  map[string]bool // path -> still ghosting
+	// deleted marks paths that have received a StatusDeleted event.
+	// They never render (deletion = instant disappearance) but the
+	// set is consulted by the touched-walk in SnapshotWith so the
+	// path's leftover heat/touches entries don't inject it back as a
+	// hot row. Re-adding the same path (StatusAdded) clears the bit.
+	deleted map[string]bool
 	added    map[string]bool // freshly added in the current frame (cleared by next Step)
 	statuses map[string]model.ChangeStatus
 
@@ -237,8 +241,8 @@ func (t *TreeState) Step(c model.Commit) {
 			t.deleted[f.Path] = true
 			delete(t.loc, f.Path)
 			// Drop from the seed too: a deleted path no longer
-			// "exists at this commit" and should not resurrect as a
-			// cold row once the ghost expires.
+			// "exists at this commit" and must not resurrect via the
+			// seeded-path branch in SnapshotWith.
 			delete(t.existing, f.Path)
 		default:
 			delete(t.deleted, f.Path)
@@ -319,8 +323,12 @@ func (t *TreeState) Snapshot() *TreeNode {
 //
 // Cold paths that were neither seeded nor touched are dropped (they
 // would carry no signal — only the seed gives us a reason to keep
-// long-cold paths visible). Deleted (ghost) files always render
-// separately because the deletion event itself is information.
+// long-cold paths visible). Deleted paths are filtered out at every
+// stage: they vanish from the rendered tree the instant their commit
+// applies. Their `t.deleted` membership is still tracked so the
+// touched-walk's `seen` filter can skip them — without that, the
+// path's leftover heat/touches entries would inject the path back as
+// a normal hot row.
 func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 	max := 0.0
 	for _, v := range t.heat {
@@ -345,6 +353,7 @@ func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 	//     (this preserves the long-standing "tree shows recent
 	//     activity" property; the seed is the dedicated mechanism
 	//     for surfacing static context, not stale activity).
+	//   - Deleted paths: never shown.
 	seen := make(map[string]bool, len(t.touches)+len(t.existing))
 	insertCandidate := func(path string) {
 		if path == "" || seen[path] || t.deleted[path] {
@@ -377,16 +386,6 @@ func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 		insertCandidate(path)
 	}
 
-	for path := range t.deleted {
-		insertNode(root, path, &TreeNode{
-			Name:    basePath(path),
-			Path:    path,
-			IsDir:   false,
-			Deleted: true,
-			Touches: t.touches[path],
-			Status:  model.StatusDeleted,
-		})
-	}
 	sortTree(root)
 	collapseCold(root)
 	return root
@@ -395,13 +394,16 @@ func (t *TreeState) SnapshotWith(opts SnapshotOpts) *TreeNode {
 // HeatSnapshot is a renderer-agnostic, JSON-friendly view of the
 // per-frame heat map. Used by the HTML output to ship precomputed
 // snapshots so the browser doesn't reimplement heat decay.
+//
+// Deleted paths are filtered out at every entry point: their leftover
+// heat/touches entries (kept in TreeState for state continuity) are
+// not exposed here. The renderer should treat absence-from-snapshot
+// as "this file is gone".
 type HeatSnapshot struct {
 	// Heat is path -> raw heat (post-decay, pre-normalization).
 	Heat map[string]float64
 	// Touches is path -> commits that have touched this path so far.
 	Touches map[string]int
-	// Ghosts is the set of paths currently in the deleted/ghost state.
-	Ghosts map[string]bool
 	// Added is the set of paths added in the most recent step.
 	Added map[string]bool
 }
@@ -413,19 +415,19 @@ func (t *TreeState) HeatSnapshot() HeatSnapshot {
 	hs := HeatSnapshot{
 		Heat:    make(map[string]float64, len(t.heat)),
 		Touches: make(map[string]int, len(t.touches)),
-		Ghosts:  make(map[string]bool, len(t.deleted)),
 		Added:   make(map[string]bool, len(t.added)),
 	}
 	for k, v := range t.heat {
+		if t.deleted[k] {
+			continue
+		}
 		hs.Heat[k] = v
 	}
 	for k, v := range t.touches {
-		hs.Touches[k] = v
-	}
-	for k, v := range t.deleted {
-		if v {
-			hs.Ghosts[k] = true
+		if t.deleted[k] {
+			continue
 		}
+		hs.Touches[k] = v
 	}
 	for k, v := range t.added {
 		if v {
@@ -467,30 +469,14 @@ func (t *TreeState) HeatSnapshotWith(opts SnapshotOpts) HeatSnapshot {
 	hs := HeatSnapshot{
 		Heat:    make(map[string]float64),
 		Touches: make(map[string]int),
-		Ghosts:  make(map[string]bool),
 		Added:   make(map[string]bool, len(t.added)),
 	}
 	for k, v := range t.heat {
-		if v < threshold {
+		if v < threshold || t.deleted[k] {
 			continue
 		}
 		hs.Heat[k] = v
 		hs.Touches[k] = t.touches[k]
-	}
-	// Mirror the player's ghost branch: it only fires for paths absent
-	// from the heat map. Step never removes from heat, so unfiltered
-	// runs effectively never use that branch — a ghost whose heat is
-	// below threshold gets dropped via the ratio check instead. We must
-	// drop those ghosts too, otherwise filtering would resurrect them as
-	// permanent 👻 rows.
-	for k, v := range t.deleted {
-		if !v {
-			continue
-		}
-		if h, ok := t.heat[k]; ok && h < threshold {
-			continue
-		}
-		hs.Ghosts[k] = true
 	}
 	for k, v := range t.added {
 		if v {
@@ -503,7 +489,7 @@ func (t *TreeState) HeatSnapshotWith(opts SnapshotOpts) HeatSnapshot {
 // collapseCold walks the tree and folds cold subtrees / cold sibling
 // groups into single placeholder rows so the pane stays readable on
 // big repos. Returns true if n contains any "hot" descendant (a real
-// file that is not Cold, or a Deleted ghost — deletion is information).
+// file that is not Cold).
 //
 // Rules:
 //
@@ -522,11 +508,7 @@ func (t *TreeState) HeatSnapshotWith(opts SnapshotOpts) HeatSnapshot {
 // The root node is never collapsed; rules apply to its children.
 func collapseCold(n *TreeNode) bool {
 	if !n.IsDir {
-		// Real leaves: hot iff not cold and not deleted... actually
-		// deleted ghosts also count as "hot" for the purposes of
-		// keeping their parent dir alive — the deletion event is
-		// information the user should see.
-		return !n.Cold || n.Deleted
+		return !n.Cold
 	}
 
 	hotChildren := make([]*TreeNode, 0, len(n.Children))

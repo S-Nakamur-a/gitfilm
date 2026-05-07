@@ -42,7 +42,11 @@ func TestTreeState_BuildsHierarchy(t *testing.T) {
 	}
 }
 
-func TestTreeState_DeletedFileBecomesGhost(t *testing.T) {
+func TestTreeState_DeletedFileVanishes(t *testing.T) {
+	// Deletion = instant disappearance. No ghost row, no leftover
+	// touches/heat in the rendered tree. The internal t.deleted map
+	// still tracks the path so the touched-walk filter excludes it
+	// even though heat[] / touches[] still carry the residual entries.
 	st := NewTreeState(0)
 	st.Step(model.Commit{Files: []model.FileChange{
 		{Path: "old.go", Status: model.StatusAdded, Added: 4},
@@ -51,12 +55,8 @@ func TestTreeState_DeletedFileBecomesGhost(t *testing.T) {
 		{Path: "old.go", Status: model.StatusDeleted, Removed: 4},
 	}})
 	root := st.Snapshot()
-	g := find(root, "old.go")
-	if g == nil {
-		t.Fatalf("ghost not present")
-	}
-	if !g.Deleted {
-		t.Errorf("expected Deleted=true, got %+v", g)
+	if find(root, "old.go") != nil {
+		t.Errorf("deleted file must not appear in the rendered tree")
 	}
 }
 

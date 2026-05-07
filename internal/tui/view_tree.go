@@ -58,8 +58,6 @@ func treeRow(n *replay.TreeNode, prefix string) string {
 	case n.CollapsedCount > 0:
 		// Sibling-leaves placeholder: "…(N more files)".
 		return prefix + styleCold.Render(fmt.Sprintf("…(%d more %s)", n.CollapsedCount, pluralFiles(n.CollapsedCount)))
-	case n.Deleted:
-		return prefix + styleGhost.Render("👻 "+name+" (deleted)")
 	case n.IsDir:
 		return prefix + name
 	case n.Cold:
@@ -69,7 +67,7 @@ func treeRow(n *replay.TreeNode, prefix string) string {
 		// marker, no heat color.
 		return prefix + styleCold.Render(name)
 	case n.Faint:
-		return prefix + treeMarker(n) + styleGhost.Render(name)
+		return prefix + treeMarker(n) + styleFaintName.Render(name)
 	default:
 		touches := ""
 		if n.Touches > 0 {
@@ -91,12 +89,8 @@ func pluralFiles(n int) string {
 }
 
 func treeMarker(n *replay.TreeNode) string {
-	switch {
-	case n.Deleted:
-		return styleGhost.Render("👻 ")
-	case n.NewInThis:
+	if n.NewInThis {
 		return styleNew.Render("✨ ")
-	default:
-		return ""
 	}
+	return ""
 }

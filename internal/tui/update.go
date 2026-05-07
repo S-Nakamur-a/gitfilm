@@ -80,8 +80,62 @@ func (m programModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.viewMode = ViewModeTree
 		}
+	case "down", "j":
+		m.filesOffset = min(m.filesOffset+1, filesScrollCap(m))
+	case "up", "k":
+		m.filesOffset = max(0, m.filesOffset-1)
+	case "pgdown", "ctrl+d":
+		m.filesOffset = min(m.filesOffset+scrollPageStep(m.height), filesScrollCap(m))
+	case "pgup", "ctrl+u":
+		m.filesOffset = max(0, m.filesOffset-scrollPageStep(m.height))
+	case "J":
+		m.treeOffset = min(m.treeOffset+1, treeScrollCap(m))
+	case "K":
+		m.treeOffset = max(0, m.treeOffset-1)
 	}
 	return m, nil
+}
+
+// scrollPageStep returns the half-page jump used by pgup/pgdown. We
+// derive it from terminal height instead of hardcoding so a tall
+// terminal pages by more lines than a short one — the user's "one
+// page" intuition stays intact across window sizes. Floor at 1 so a
+// pathologically short window still scrolls.
+func scrollPageStep(termHeight int) int {
+	step := termHeight / 2
+	if step < 1 {
+		step = 1
+	}
+	return step
+}
+
+// filesScrollCap is a loose upper bound on right-pane offset growth.
+// scrollWindow re-clamps to the actual content height at render
+// time, but Bubble Tea's value-receiver View can't write the clamp
+// back to the model, so without a handler-side cap a user holding
+// pgdown past the bottom would balloon the offset and then need
+// dozens of pgup presses before the window starts moving. The cap
+// is `commitFiles * (max card height) + slack` so it stays comfortably
+// above any plausible rendered total without being precise.
+func filesScrollCap(m programModel) int {
+	if m.idx < 0 || m.idx >= len(m.history.Commits) {
+		return 0
+	}
+	files := len(m.history.Commits[m.idx].Files)
+	return files*expandedCardLines + commitCardRows + 8
+}
+
+// treeScrollCap is the analog of filesScrollCap for the left pane.
+// The tree's rendered row count is bounded by touched paths plus
+// seeded paths plus directory rows; we approximate with
+// touches+existing and add slack for directory rows and placeholder
+// summaries.
+func treeScrollCap(m programModel) int {
+	if m.tree == nil {
+		return 0
+	}
+	cnt := m.tree.Counts()
+	return cnt.UniqueFiles + 32
 }
 
 // advanceOrPauseAtEnd is called when the dwell for the current
@@ -127,7 +181,6 @@ func (m programModel) applyBatch(b gitlog.LoadBatch) (tea.Model, tea.Cmd) {
 			m.addsAt = append(m.addsAt, adds)
 			m.removesAt = append(m.removesAt, rems)
 			m.headTree.Step(c)
-			m.filesAt = append(m.filesAt, m.headTree.Counts().UniqueFiles)
 			absIdx := startIdx + i
 			if (absIdx+1)%snapshotInterval == 0 {
 				m.recordSnapshot(absIdx, m.headTree)

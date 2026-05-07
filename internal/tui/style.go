@@ -16,8 +16,11 @@ var (
 	styleDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	styleAdd      = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
 	styleDel      = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	styleNew      = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	styleGhost    = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Faint(true)
+	styleNew = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	// styleFaintName paints tree-list filenames whose heat is in
+	// [HiddenBelow, FaintBelow) — alive but cooled. Drawn dim so the
+	// row reads as "still here, not the focus".
+	styleFaintName = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Faint(true)
 	// styleCold is used for "exists but not active" rows: the cold
 	// tier of real files in the seeded set, plus the …(N files)
 	// placeholders that summarize cold subtrees and sibling groups.

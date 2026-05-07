@@ -1,48 +1,11 @@
 package replay
 
-import "sort"
-
 // Sparkline glyphs in ascending order. Eight levels — the smallest
 // "▁" is one-eighth height, "█" is full. Empty slots use " " so
 // caret/marker styling can sit on a clear cell. Kept here as a
 // single source of truth so the TUI and any future renderer can't
 // drift on which characters represent which buckets.
 var sparkRunes = [8]rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
-
-// PercentileMax returns the value at the given percentile of the
-// strictly-positive entries of values. Used by churn sparklines to
-// pick a Y-axis ceiling that ignores extreme outliers (a single
-// 50K-line generated-file commit would otherwise crush every other
-// bar to a 1-pixel sliver). When the chosen percentile equals or
-// undershoots the absolute max, callers should fall back to max so
-// the chart still spans full height; PercentileMax does not do that
-// substitution itself because the caller usually wants to know the
-// ceiling separately for its own clipping decisions.
-//
-// percentile is clamped to [0, 1]. Zeroes and negatives are dropped
-// before percentile calculation — empty input or all-zero input
-// returns 0.
-func PercentileMax(values []int, percentile float64) int {
-	if percentile < 0 {
-		percentile = 0
-	}
-	if percentile > 1 {
-		percentile = 1
-	}
-	pos := make([]int, 0, len(values))
-	for _, v := range values {
-		if v > 0 {
-			pos = append(pos, v)
-		}
-	}
-	if len(pos) == 0 {
-		return 0
-	}
-	sort.Ints(pos)
-	idx := int(percentile*float64(len(pos)-1) + 0.5)
-	idx = min(max(idx, 0), len(pos)-1)
-	return pos[idx]
-}
 
 // SparklineGlyph picks a single glyph for a normalized value in
 // [0, 1]. Values <= 0 fall to "▁" (the lowest visible glyph) so
