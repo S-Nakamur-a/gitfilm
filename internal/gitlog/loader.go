@@ -85,6 +85,32 @@ type LoadRequest struct {
 	Against string
 	SubDir  string
 	MaxN    int
+	// Authors, if non-empty, restricts the loaded commits to those whose
+	// author name OR email matches any of these patterns. Each value is
+	// passed straight through as `--author=<v>` to `git log`, so git's
+	// regex semantics apply. Multiple values are OR'd by git.
+	//
+	// Filter is applied at the loader (commitCount + per-shard log), not
+	// to featureSet — feat/against tagging stays based on full
+	// reachability so a filtered commit's tag matches its position in
+	// the un-filtered history.
+	Authors []string
+}
+
+// authorArgs renders req.Authors as one `--author=<v>` flag per value.
+// Empty / whitespace-only entries are dropped so callers can pass raw
+// CLI input without pre-trimming.
+func authorArgs(req LoadRequest) []string {
+	if len(req.Authors) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(req.Authors))
+	for _, a := range req.Authors {
+		if a = strings.TrimSpace(a); a != "" {
+			out = append(out, "--author="+a)
+		}
+	}
+	return out
 }
 
 // Load walks Branch with --first-parent and produces a History where each
@@ -204,6 +230,7 @@ func (l *Loader) commitCount(req LoadRequest) (int, error) {
 	if req.MaxN > 0 {
 		args = append(args, "-n", strconv.Itoa(req.MaxN))
 	}
+	args = append(args, authorArgs(req)...)
 	args = append(args, req.Branch)
 	if req.SubDir != "" {
 		args = append(args, "--", req.SubDir)
@@ -236,6 +263,7 @@ func (l *Loader) loadShardTimed(req LoadRequest, skip, take int) (shardOutput, e
 		"--skip", strconv.Itoa(skip),
 		"-n", strconv.Itoa(take),
 	}
+	args = append(args, authorArgs(req)...)
 	args = append(args, req.Branch)
 	if req.SubDir != "" {
 		args = append(args, "--", req.SubDir)

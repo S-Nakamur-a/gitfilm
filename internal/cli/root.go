@@ -23,6 +23,7 @@ type options struct {
 	subdir        string
 	htmlOut       string
 	maxN          int
+	authors       []string
 	stats         bool
 	verbose       bool
 	scramble      bool
@@ -53,6 +54,7 @@ func New(version string) *cobra.Command {
 	cmd.Flags().StringVar(&opts.subdir, "path", "", "limit to changes under this subdirectory (relative to repo root)")
 	cmd.Flags().StringVar(&opts.htmlOut, "html-out", "gitfilm.html", "html output file path (when -o html)")
 	cmd.Flags().IntVar(&opts.maxN, "max", 0, "limit to the most recent N commits (0 = no limit)")
+	cmd.Flags().StringSliceVar(&opts.authors, "author", nil, "filter to commits whose author name or email matches `regex` (repeatable; comma-separated values are OR'd; values pass through to git log --author)")
 	cmd.Flags().BoolVar(&opts.stats, "stats", false, "print load time, dwell distribution, and per-commit stats; do not render")
 	cmd.Flags().BoolVarP(&opts.verbose, "verbose", "v", false, "log per-stage timings and memory to stderr (always on for non-tui modes)")
 	cmd.Flags().BoolVar(&opts.scramble, "scramble", false, "render the typing animation as a 'movie decoder' effect: noisy characters that snap to the real text as they're typed")
@@ -73,8 +75,8 @@ func run(branch string, opts options) error {
 	verbose := opts.verbose || opts.mode != "tui"
 	if verbose {
 		loader.SetDiag(os.Stderr)
-		fmt.Fprintf(os.Stderr, "[gitfilm] starting: branch=%s against=%s mode=%s max=%d subdir=%q\n",
-			branch, opts.against, opts.mode, opts.maxN, opts.subdir)
+		fmt.Fprintf(os.Stderr, "[gitfilm] starting: branch=%s against=%s mode=%s max=%d subdir=%q authors=%v\n",
+			branch, opts.against, opts.mode, opts.maxN, opts.subdir, opts.authors)
 	}
 
 	req := gitlog.LoadRequest{
@@ -82,6 +84,7 @@ func run(branch string, opts options) error {
 		Against: opts.against,
 		SubDir:  opts.subdir,
 		MaxN:    opts.maxN,
+		Authors: opts.authors,
 	}
 
 	// TUI takes the streaming path: first paint happens as soon as the

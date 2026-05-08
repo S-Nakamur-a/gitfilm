@@ -121,6 +121,59 @@ func TestLoader_FallbackWhenAgainstUnreachable(t *testing.T) {
 	}
 }
 
+func TestLoader_AuthorsPropagateToGitArgs(t *testing.T) {
+	diff := "diff --git a/x.txt b/x.txt\nnew file mode 100644\n--- /dev/null\n+++ b/x.txt\n@@ -0,0 +1,1 @@\n+hi\n"
+	logOutput := commitChunk("C1hash00", "subj", "", diff)
+
+	// Prefixes here intentionally stop before any branch token so that
+	// they still match when --author= flags are spliced in between
+	// the subcommand and the rev.
+	fr := &fakeRunner{responses: map[string]string{
+		"log --first-parent --no-color":     logOutput,
+		"rev-list --first-parent main ^foo": "",
+		"rev-list --first-parent --count":   "1\n",
+	}}
+	l := NewLoaderWithRunner(fr)
+	_, err := l.Load(LoadRequest{
+		Branch:  "main",
+		Against: "foo",
+		// Whitespace-only entry must be dropped; the rest pass through.
+		Authors: []string{"alice", "  ", "bob@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Both the count phase and the per-shard log must see the filter.
+	wantContains := []struct {
+		prefix string
+		flags  []string
+	}{
+		{"rev-list --first-parent --count", []string{"--author=alice", "--author=bob@example.com"}},
+		{"log --first-parent --no-color", []string{"--author=alice", "--author=bob@example.com"}},
+	}
+	for _, w := range wantContains {
+		var matched string
+		for _, c := range fr.calls {
+			if strings.HasPrefix(c, w.prefix) {
+				matched = c
+				break
+			}
+		}
+		if matched == "" {
+			t.Fatalf("no call with prefix %q in %v", w.prefix, fr.calls)
+		}
+		for _, f := range w.flags {
+			if !strings.Contains(matched, f) {
+				t.Errorf("%q missing from call %q", f, matched)
+			}
+		}
+		if strings.Contains(matched, "--author=  ") || strings.Contains(matched, "--author= ") {
+			t.Errorf("whitespace-only author leaked into call: %q", matched)
+		}
+	}
+}
+
 func TestParseLogP_BodyAndSubjectPreserved(t *testing.T) {
 	body := "this is\na multi-line\nbody"
 	chunk := commitChunk("aaaaaaa1", "subject line", body, "")
