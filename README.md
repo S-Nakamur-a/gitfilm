@@ -55,7 +55,7 @@ build is just `go run ./cmd/git-film -o html` away.
 | --- | --- | --- |
 | `--against` | `main` | branch used as the merge-base split point |
 | `-o, --output` | `tui` | `tui` or `html` |
-| `--max` | `500` | cap commits loaded; `0` = no limit |
+| `--max` | `0` | cap commits loaded; `0` = no limit |
 | `--path` | "" | only show changes under this subdirectory |
 | `--repo` | `.` | path to the git repository |
 | `--html-out` | `gitfilm.html` | output file when `-o html` |

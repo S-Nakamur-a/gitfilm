@@ -52,7 +52,7 @@ func New(version string) *cobra.Command {
 	cmd.Flags().StringVar(&opts.repo, "repo", ".", "path to the git repository")
 	cmd.Flags().StringVar(&opts.subdir, "path", "", "limit to changes under this subdirectory (relative to repo root)")
 	cmd.Flags().StringVar(&opts.htmlOut, "html-out", "gitfilm.html", "html output file path (when -o html)")
-	cmd.Flags().IntVar(&opts.maxN, "max", 500, "limit to the most recent N commits (0 = no limit, careful on big repos)")
+	cmd.Flags().IntVar(&opts.maxN, "max", 0, "limit to the most recent N commits (0 = no limit)")
 	cmd.Flags().BoolVar(&opts.stats, "stats", false, "print load time, dwell distribution, and per-commit stats; do not render")
 	cmd.Flags().BoolVarP(&opts.verbose, "verbose", "v", false, "log per-stage timings and memory to stderr (always on for non-tui modes)")
 	cmd.Flags().BoolVar(&opts.scramble, "scramble", false, "render the typing animation as a 'movie decoder' effect: noisy characters that snap to the real text as they're typed")

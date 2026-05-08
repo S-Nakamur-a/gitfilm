@@ -26,7 +26,7 @@ Useful runtime flags (full list in `internal/cli/root.go`):
 
 - `--against main` — branch used as the merge-base split point.
 - `-o tui|html` — output mode (default `tui`); `--html-out` controls the file path.
-- `--max 500` — cap commits loaded; `0` = no limit.
+- `--max 0` — cap commits loaded (default `0` = no limit).
 - `--path <subdir>` — restrict to a subtree.
 - `--stats` — print load time, dwell distribution, per-commit stats, and exit
   without rendering. Use this when tuning loader/animation perf — it is the
