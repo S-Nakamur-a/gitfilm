@@ -13,8 +13,12 @@ import (
 	_ "github.com/S-Nakamur-a/gitfilm/internal/tui"
 )
 
+// version is overridden at release time via -ldflags "-X main.version=...".
+// See .goreleaser.yml. Default "dev" is what `go install` users see.
+var version = "dev"
+
 func main() {
-	if err := cli.New().Execute(); err != nil {
+	if err := cli.New(version).Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

@@ -3,6 +3,7 @@ package tui
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/S-Nakamur-a/gitfilm/internal/model"
 	"github.com/S-Nakamur-a/gitfilm/internal/replay"
@@ -13,21 +14,23 @@ import (
 // commit: elapsed dwell vs. its total dwell. Sits directly above
 // the timeline strip so the eye reads "where in *this* commit"
 // stacked over "where in the *whole* film".
+//
+// Padded on the left by footerGutterW so the bar's start column
+// matches the timeline cells and the add/rem sparklines below.
 func (m programModel) renderCommitProgress(width int) string {
-	if width < 4 || len(m.history.Commits) == 0 {
+	if width < footerGutterW+4 || len(m.history.Commits) == 0 {
 		return ""
 	}
+	graphW := width - footerGutterW
 	frac := m.commitProgress()
-	filled := int(float64(width) * frac)
-	if filled > width {
-		filled = width
-	}
+	filled := min(int(float64(graphW)*frac), graphW)
 	style := styleNew
 	if !m.playing {
 		style = styleDim
 	}
-	return style.Render(strings.Repeat("━", filled)) +
-		styleDim.Render(strings.Repeat("─", width-filled))
+	return strings.Repeat(" ", footerGutterW) +
+		style.Render(strings.Repeat("━", filled)) +
+		styleDim.Render(strings.Repeat("─", graphW-filled))
 }
 
 // renderTimelineBar draws a time-based strip whose horizontal
@@ -49,13 +52,15 @@ func (m programModel) renderCommitProgress(width int) string {
 // across an 8-step truecolor brightness ramp per branch tag — finer
 // granularity at the cost of needing a truecolor-capable terminal.
 func (m programModel) renderTimelineBar(width int) string {
-	if width < 10 || len(m.history.Commits) == 0 {
+	if width < footerGutterW+10 || len(m.history.Commits) == 0 {
 		return ""
 	}
-	cells := replay.TimelineBins(m.history.Commits, width)
-	density, maxD := smoothedDensity(cells, timelineWindow(width))
+	graphW := width - footerGutterW
+	cells := replay.TimelineBins(m.history.Commits, graphW)
+	density, maxD := smoothedDensity(cells, timelineWindow(graphW))
 
 	var sb strings.Builder
+	sb.WriteString(strings.Repeat(" ", footerGutterW))
 	switch m.colorMode {
 	case ColorModeGlyph:
 		q1, q2, q3 := positiveQuartiles(density)
@@ -70,14 +75,68 @@ func (m programModel) renderTimelineBar(width int) string {
 	}
 
 	frac := replay.TimelineFrac(m.history.Commits, m.idx)
-	caret := int(frac * float64(width-1))
-	if caret < 0 {
-		caret = 0
+	caret := min(max(int(frac*float64(graphW-1)), 0), graphW-1)
+	axisRow := strings.Repeat(" ", footerGutterW) + m.renderTimeAxisRow(graphW, caret)
+	return sb.String() + "\n" + axisRow
+}
+
+// renderTimeAxisRow composes the row beneath the timeline cells. It
+// carries the caret triangle (current playback position on the
+// time axis) plus a left "N ago" label anchored to the oldest
+// commit and a right "N ago" label anchored to the newest commit.
+//
+// Labels are dropped when they would collide with the caret or with
+// each other — the caret is the primary signal and always wins. At
+// playback start the right label ("today") provides an anchor for
+// where the timeline ends; near the end the left label ("1y ago")
+// reminds the viewer where it began. Together they keep the strip
+// readable without consuming an extra row.
+//
+// caret must be in [0, graphW-1]; callers enforce that bound.
+func (m programModel) renderTimeAxisRow(graphW, caret int) string {
+	if graphW <= 0 || len(m.history.Commits) == 0 {
+		return ""
 	}
-	if caret >= width {
-		caret = width - 1
+	now := time.Now()
+	commits := m.history.Commits
+	leftLabel := humanAgo(now.Sub(commits[0].When))
+	rightLabel := humanAgo(now.Sub(commits[len(commits)-1].When))
+
+	leftLen, rightLen := len(leftLabel), len(rightLabel)
+	const labelGap = 1 // min visible gap between a label and the caret
+	// Both labels must fit alongside the caret; if not, hide the closer one.
+	canShowLeft := leftLen+labelGap <= caret
+	canShowRight := caret+1+labelGap <= graphW-rightLen
+	// And labels must not overlap each other.
+	if leftLen+labelGap > graphW-rightLen {
+		canShowLeft = false
+		canShowRight = false
 	}
-	return sb.String() + "\n" + strings.Repeat(" ", caret) + styleTitle.Render("▲")
+
+	var sb strings.Builder
+	col := 0
+	if canShowLeft {
+		sb.WriteString(styleDim.Render(leftLabel))
+		col = leftLen
+	}
+	if caret > col {
+		sb.WriteString(strings.Repeat(" ", caret-col))
+		col = caret
+	}
+	sb.WriteString(styleTitle.Render("▲"))
+	col = caret + 1
+	rightStart := graphW - rightLen
+	gapEnd := graphW
+	if canShowRight {
+		gapEnd = rightStart
+	}
+	if gapEnd > col {
+		sb.WriteString(strings.Repeat(" ", gapEnd-col))
+	}
+	if canShowRight {
+		sb.WriteString(styleDim.Render(rightLabel))
+	}
+	return sb.String()
 }
 
 func timelineCellStyle(c replay.TimelineCell, density float64, cells []replay.TimelineCell, i int) lipgloss.Style {

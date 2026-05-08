@@ -1,0 +1,83 @@
+# goreleaser config — builds prebuilt binaries on `git push origin v*`.
+# Run locally with `goreleaser release --snapshot --clean` to verify.
+
+version: 2
+
+project_name: gitfilm
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: git-film
+    main: ./cmd/git-film
+    binary: git-film
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # -s -w strips DWARF/symbol tables so the binary is ~30% smaller.
+    # -X main.version replaces the "dev" default at link time so
+    # `git-film --version` reports the release tag.
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - README.md
+      - LICENSE
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-next'
+
+# Auto-generated changelog from commit subjects. The exclude filters
+# match the project's conventional-commit prefixes — chore/refactor/
+# docs noise stays out of the release notes; feat/fix/perf land in.
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^feat[:(]'
+      order: 0
+    - title: Fixes
+      regexp: '^fix[:(]'
+      order: 1
+    - title: Performance
+      regexp: '^perf[:(]'
+      order: 2
+    - title: Other
+      order: 999
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^refactor:'
+      - '^ci:'
+      - '^style:'
+
+release:
+  draft: false
+  prerelease: auto

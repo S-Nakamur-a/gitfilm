@@ -85,6 +85,48 @@ func TimelineBins(commits []model.Commit, width int) []TimelineCell {
 	return cells
 }
 
+// TimelineMaxByTime bins per-commit `values` onto a time-based strip
+// of `width` cells whose horizontal axis matches TimelineBins exactly
+// (same tmin/tmax/span). Each cell reports the max of values for
+// commits whose When falls in that cell; cells with no commit get 0.
+//
+// Use this (instead of DownsampleMax) when a sparkline must align
+// horizontally with a TimelineBins-rendered strip — DownsampleMax
+// bins by commit index, so a long quiet stretch and a busy day each
+// occupy the same number of cells, and peaks/caret drift out of sync
+// with the time-axis strip above.
+func TimelineMaxByTime(commits []model.Commit, values []int, width int) []float64 {
+	if width <= 0 || len(commits) == 0 {
+		return nil
+	}
+	n := min(len(commits), len(values))
+	out := make([]float64, width)
+	if n == 0 {
+		return out
+	}
+	tmin, tmax := timelineSpan(commits[:n])
+	span := tmax.Sub(tmin)
+	for i := range n {
+		var b int
+		if span <= 0 {
+			b = width - 1
+		} else {
+			frac := float64(commits[i].When.Sub(tmin)) / float64(span)
+			b = int(frac * float64(width))
+			if b >= width {
+				b = width - 1
+			}
+			if b < 0 {
+				b = 0
+			}
+		}
+		if v := float64(values[i]); v > out[b] {
+			out[b] = v
+		}
+	}
+	return out
+}
+
 // TimelineFrac returns the 0..1 horizontal position of commits[idx] on
 // the time-based timeline. When all commits share one instant, falls
 // back to even spacing (idx / (N-1)) so the caret still slides during

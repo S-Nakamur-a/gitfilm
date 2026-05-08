@@ -15,6 +15,13 @@ const (
 	minCommitPaneW = 30
 )
 
+// footerGutterW is the left margin reserved for row labels in the
+// footer ("add   ", "rem   "). The timeline strip and the per-commit
+// progress bar pad themselves by this same width so all four data
+// rows (progress, timeline cells, add, rem) line up at the same
+// starting column and share one wall-clock X axis.
+const footerGutterW = 6
+
 // Right-pane card layout. expandedCardLines is the height (in rows)
 // of one full file card: 1 header row + (expandedCardLines-1) diff
 // rows. Increasing this gives each card more scroll capacity but

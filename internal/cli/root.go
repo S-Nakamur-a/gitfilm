@@ -33,11 +33,12 @@ type options struct {
 	showGenerated bool
 }
 
-func New() *cobra.Command {
+func New(version string) *cobra.Command {
 	var opts options
 	cmd := &cobra.Command{
-		Use:   "git-film <branch>",
-		Short: "Replay your git history as an animation",
+		Use:     "git-film <branch>",
+		Short:   "Replay your git history as an animation",
+		Version: version,
 		Long: "git-film walks a branch with --first-parent, tags commits by their\n" +
 			"originating branch (split at merge-base with --against), and replays\n" +
 			"the diffs as an animation in the terminal or a single HTML file.",

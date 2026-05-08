@@ -3,16 +3,31 @@
 Replay your git history as an animation in the terminal — or as a single
 self-contained HTML file you can share.
 
+![demo](docs/demo.gif)
+
+## Install
+
+Pick whichever fits:
+
 ```sh
-# install (places `git-film` onto $GOBIN)
-make install
-# or directly:
+# 1) Prebuilt binary from the latest release:
+#    https://github.com/S-Nakamur-a/gitfilm/releases
+#    (untar; drop `git-film` somewhere on $PATH).
+
+# 2) From source onto $GOBIN:
 go install github.com/S-Nakamur-a/gitfilm/cmd/git-film@latest
 
-# git automatically routes "git film ..." to the git-film binary.
+# 3) From a checkout:
+make install
+```
+
+Once `git-film` is on `$PATH`, git auto-routes `git film …` to it.
+
+```sh
 git film feat/xyz --against main          # TUI (default)
 git film feat/xyz --against main -o html  # writes gitfilm.html
 git film feat/xyz --against main --stats  # load time / dwell distribution
+git film --version                        # release tag (or "dev" from source)
 ```
 
 ## What it does

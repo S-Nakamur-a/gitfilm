@@ -49,24 +49,26 @@ var (
 // single cell. Adds and removes share one ceiling so a 1000-add bar
 // reads as the same height as a 1000-remove bar.
 //
+// The X axis is wall-clock time, binned identically to the timeline
+// strip above (replay.TimelineMaxByTime / TimelineFrac). That keeps
+// the spark caret and peaks vertically aligned with the timeline
+// caret and density cells: cell `i` covers the same time slice on
+// every row. The "add   "/"rem   " label width matches footerGutterW
+// so the indented timeline starts at the same column as the bars.
+//
 // Returns "" when the strip is too narrow or there's nothing to graph
 // yet; callers should treat empty as "skip the row".
 func (m programModel) renderMiniGraphs(width int) string {
-	if width < 16 || len(m.addsAt) == 0 {
+	if width < footerGutterW+10 || len(m.addsAt) == 0 {
 		return ""
 	}
-	const labelW = 6
-	graphW := width - labelW
-	if graphW < 8 {
-		return ""
-	}
+	graphW := width - footerGutterW
 
-	loaded := len(m.addsAt)
-	caret := replay.CaretBucket(m.idx, loaded, graphW)
-
-	addBins := replay.DownsampleMax(m.addsAt, graphW)
-	remBins := replay.DownsampleMax(m.removesAt, graphW)
+	addBins := replay.TimelineMaxByTime(m.history.Commits, m.addsAt, graphW)
+	remBins := replay.TimelineMaxByTime(m.history.Commits, m.removesAt, graphW)
 	ceiling := logCeiling(addBins, remBins)
+
+	caret := min(max(int(replay.TimelineFrac(m.history.Commits, m.idx)*float64(graphW-1)), 0), graphW-1)
 
 	addBars := buildLogSparkline(addBins, graphW, caret, ceiling, sparkAddPast, sparkAddFuture)
 	remBars := buildLogSparkline(remBins, graphW, caret, ceiling, sparkRemPast, sparkRemFuture)

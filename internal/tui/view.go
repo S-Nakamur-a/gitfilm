@@ -217,6 +217,31 @@ func humanSpan(d time.Duration) string {
 	}
 }
 
+// humanAgo formats how far in the past a moment is, as a short axis
+// label ("3mo ago", "today", "1.5y ago"). Sister to humanSpan; the
+// "ago" phrasing anchors the timeline endpoints to the viewer's
+// current sense of time without forcing them to parse YYYY-MM-DD.
+//
+// Negative durations (a commit author-dated in the future, possible
+// after a clock-skewed rebase) collapse to "today" — the timeline
+// strip already shows the cell, the label just shouldn't lie.
+func humanAgo(d time.Duration) string {
+	if d < 0 {
+		return "today"
+	}
+	days := int(d.Hours() / 24)
+	switch {
+	case days < 1:
+		return "today"
+	case days < 30:
+		return fmt.Sprintf("%dd ago", days)
+	case days < 365:
+		return fmt.Sprintf("%dmo ago", days/30)
+	default:
+		return fmt.Sprintf("%.1fy ago", float64(days)/365)
+	}
+}
+
 func footerLegend(againstName string) string {
 	heatChips := make([]string, 0, len(heatPalette))
 	for i, t := range heatPalette {
