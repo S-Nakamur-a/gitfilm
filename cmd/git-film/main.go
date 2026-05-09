@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/S-Nakamur-a/gitfilm/internal/cli"
@@ -18,8 +17,10 @@ import (
 var version = "dev"
 
 func main() {
+	// Cobra prints the error itself ("Error: <msg>") on Execute failure;
+	// we just need to surface the non-zero exit code. Re-printing here
+	// would duplicate the message on stderr.
 	if err := cli.New(version).Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }

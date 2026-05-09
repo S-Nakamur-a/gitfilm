@@ -45,6 +45,13 @@ func New(version string) *cobra.Command {
 			"the diffs as an animation in the terminal or a single HTML file.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Don't dump the usage banner when the run itself fails —
+			// that floods over the actual error message and any
+			// actionable hint it carries (e.g. "no commits matched").
+			// Setting it inside RunE leaves usage enabled for the
+			// arg-count / flag-parsing errors that fire BEFORE RunE,
+			// where the usage text genuinely helps.
+			cmd.SilenceUsage = true
 			return run(args[0], opts)
 		},
 	}
